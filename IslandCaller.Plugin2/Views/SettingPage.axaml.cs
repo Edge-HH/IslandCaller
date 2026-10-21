@@ -71,6 +71,12 @@ public partial class SettingPage : SettingsPageBase
             return;
         }
 
+        // 对话框期间 RemoteCI 可能已启用锁定，需要再检查一次。
+        if (IsLocked())
+        {
+            return;
+        }
+
         var profileId = Guid.NewGuid();
         try
         {
@@ -322,7 +328,7 @@ public partial class SettingPage : SettingsPageBase
                     FileShare.Read,
                     bufferSize: 81920,
                     useAsync: true);
-                await transferService.ImportAsync(packageStream);
+                await transferService.ImportAsync(packageStream, isBlocked: () => vm.IsSettingsLocked);
             }
             finally
             {
@@ -341,6 +347,11 @@ public partial class SettingPage : SettingsPageBase
 
             await CommonTaskDialogs.ShowDialog("导入完成", "数据包已成功导入，应用将重新启动以应用设置。", this);
             RequestRestart();
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogInformation("导入过程中设置页被 RemoteCI 锁定，已取消导入");
+            await CommonTaskDialogs.ShowDialog("导入已取消", "管理员已通过 RemoteCI 锁定 IslandCaller 设置，未导入任何数据。", this);
         }
         catch (Exception ex)
         {

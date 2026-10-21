@@ -30,6 +30,12 @@ public class ProfileEditorViewModel : ReactiveObject
     public ICommand RowCommand { get; }
 
     private readonly RemotePolicyService _policy;
+    private readonly ProfileService _profileService;
+    private readonly ProfileSetting _profileSetting;
+
+    /// <summary>编辑器最近一次与磁盘同步时的名单内容与名称，用于识别外部修改。</summary>
+    private List<Person> _baselineMembers;
+    private string _baselineName;
 
     /// <summary>RemoteCI 公平模式生效时手动权重固定为 1，不允许编辑。</summary>
     public bool IsFairModeActive => _policy.IsFairModeActive;
@@ -50,25 +56,32 @@ public class ProfileEditorViewModel : ReactiveObject
     {
         ProfileId = profileId;
         _policy = IAppHost.GetService<RemotePolicyService>();
-        if (!Settings.Instance.Profile.ProfileList.TryGetValue(profileId, out var profileName))
+        _profileService = IAppHost.GetService<ProfileService>();
+        _profileSetting = Settings.Instance.Profile;
+        if (!_profileSetting.ProfileList.TryGetValue(profileId, out var profileName))
         {
             throw new InvalidOperationException($"找不到档案 {profileId} 的名称配置。");
         }
 
-        var profileService = IAppHost.GetService<ProfileService>();
         ProfileName = profileName;
-        ProfileList = new ObservableCollection<StudentModel>(profileService.GetMembers(profileId)
+        _baselineName = profileName;
+        _baselineMembers = _profileService.GetMembers(profileId);
+        ProfileList = new ObservableCollection<StudentModel>(_baselineMembers
             .OrderBy(m => m.Id)
             .Select(ToStudentModel));
 
         RowCommand = new RelayCommand<StudentModel>(RemoveStudent);
         _policy.PropertyChanged += PolicyOnPropertyChanged;
+        _profileService.ProfileSaved += OnProfileSaved;
+        _profileSetting.PropertyChanged += OnProfileSettingChanged;
     }
 
-    /// <summary>编辑器关闭时调用，解除对管控策略的订阅。</summary>
+    /// <summary>编辑器关闭时调用，解除对管控策略与名单变化的订阅。</summary>
     public void Detach()
     {
         _policy.PropertyChanged -= PolicyOnPropertyChanged;
+        _profileService.ProfileSaved -= OnProfileSaved;
+        _profileSetting.PropertyChanged -= OnProfileSettingChanged;
     }
 
     private void PolicyOnPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -78,13 +91,100 @@ public class ProfileEditorViewModel : ReactiveObject
             return;
         }
 
-        Dispatcher.UIThread.Post(() =>
+        RunOnUiThread(() =>
         {
+            // 公平模式生效时丢弃缓存中的旧权重，否则之后关闭公平模式、编辑器关闭时会把旧权重写回。
+            if (IsFairModeActive)
+            {
+                foreach (var student in ProfileList)
+                {
+                    student.ManualWeight = 1.0;
+                }
+            }
+
             this.RaisePropertyChanged(nameof(IsFairModeActive));
             this.RaisePropertyChanged(nameof(IsWeightEditable));
             this.RaisePropertyChanged(nameof(IsSettingsLocked));
             this.RaisePropertyChanged(nameof(GridHeight));
         });
+    }
+
+    private void OnProfileSaved(object? sender, Guid profileId)
+    {
+        if (profileId == ProfileId)
+        {
+            RunOnUiThread(SyncMembersFromDisk);
+        }
+    }
+
+    private void OnProfileSettingChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ProfileSetting.ProfileList))
+        {
+            RunOnUiThread(SyncNameFromSettings);
+        }
+    }
+
+    /// <summary>
+    /// 名单被编辑器之外的途径（如 RemoteCI 下发）改写后，用磁盘内容刷新编辑器，
+    /// 避免关闭编辑器时把过期的缓存写回、撤销管理员的修改。编辑器自身保存产生的变化会因内容一致而被忽略。
+    /// </summary>
+    private void SyncMembersFromDisk()
+    {
+        List<Person> latest;
+        try
+        {
+            latest = _profileService.GetMembers(ProfileId);
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        if (SameMembers(latest, _baselineMembers))
+        {
+            return;
+        }
+
+        _baselineMembers = latest;
+        if (!SameMembers(latest, ToMembers()))
+        {
+            ReplaceMembers(latest);
+        }
+    }
+
+    private void SyncNameFromSettings()
+    {
+        if (!_profileSetting.ProfileList.TryGetValue(ProfileId, out var latest) || latest == _baselineName)
+        {
+            return;
+        }
+
+        _baselineName = latest;
+        ProfileName = latest;
+    }
+
+    private static void RunOnUiThread(Action action)
+    {
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            action();
+        }
+        else
+        {
+            Dispatcher.UIThread.Post(action);
+        }
+    }
+
+    private static bool SameMembers(IEnumerable<Person> left, IEnumerable<Person> right)
+    {
+        var a = left.OrderBy(m => m.Id).ToList();
+        var b = right.OrderBy(m => m.Id).ToList();
+        return a.Count == b.Count && a.Zip(b).All(pair =>
+            pair.First.Id == pair.Second.Id &&
+            pair.First.Name == pair.Second.Name &&
+            pair.First.Gender == pair.Second.Gender &&
+            Math.Abs(pair.First.ManualWeight - pair.Second.ManualWeight) <= 0.0001);
     }
 
     public void AddStudent()
