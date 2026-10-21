@@ -1,9 +1,11 @@
+using Avalonia.Threading;
 using ClassIsland.Shared;
 using CommunityToolkit.Mvvm.Input;
 using IslandCaller.Models;
 using IslandCaller.Services;
 using ReactiveUI;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Windows.Input;
 using static IslandCaller.Services.ProfileService;
 
@@ -27,9 +29,27 @@ public class ProfileEditorViewModel : ReactiveObject
 
     public ICommand RowCommand { get; }
 
+    private readonly RemotePolicyService _policy;
+
+    /// <summary>RemoteCI 公平模式生效时手动权重固定为 1，不允许编辑。</summary>
+    public bool IsFairModeActive => _policy.IsFairModeActive;
+
+    public bool IsWeightEditable => !IsFairModeActive;
+
+    /// <summary>设置页被 RemoteCI 锁定时编辑器只读，修改不会被保存。</summary>
+    public bool IsSettingsLocked => _policy.IsSettingsLocked;
+
+    private const double BaseGridHeight = 470;
+    private const double NoticeBarHeight = 60;
+
+    /// <summary>管控提示条占用窗口高度时相应压缩名单表格，保证底部按钮在默认窗口内完整可见。</summary>
+    public double GridHeight =>
+        BaseGridHeight - NoticeBarHeight * ((IsSettingsLocked ? 1 : 0) + (IsFairModeActive ? 1 : 0));
+
     public ProfileEditorViewModel(Guid profileId)
     {
         ProfileId = profileId;
+        _policy = IAppHost.GetService<RemotePolicyService>();
         if (!Settings.Instance.Profile.ProfileList.TryGetValue(profileId, out var profileName))
         {
             throw new InvalidOperationException($"找不到档案 {profileId} 的名称配置。");
@@ -42,6 +62,29 @@ public class ProfileEditorViewModel : ReactiveObject
             .Select(ToStudentModel));
 
         RowCommand = new RelayCommand<StudentModel>(RemoveStudent);
+        _policy.PropertyChanged += PolicyOnPropertyChanged;
+    }
+
+    /// <summary>编辑器关闭时调用，解除对管控策略的订阅。</summary>
+    public void Detach()
+    {
+        _policy.PropertyChanged -= PolicyOnPropertyChanged;
+    }
+
+    private void PolicyOnPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is not (nameof(RemotePolicyService.IsFairModeActive) or nameof(RemotePolicyService.IsSettingsLocked)))
+        {
+            return;
+        }
+
+        Dispatcher.UIThread.Post(() =>
+        {
+            this.RaisePropertyChanged(nameof(IsFairModeActive));
+            this.RaisePropertyChanged(nameof(IsWeightEditable));
+            this.RaisePropertyChanged(nameof(IsSettingsLocked));
+            this.RaisePropertyChanged(nameof(GridHeight));
+        });
     }
 
     public void AddStudent()
@@ -70,7 +113,7 @@ public class ProfileEditorViewModel : ReactiveObject
             Id = s.ID,
             Name = s.Name,
             Gender = s.Gender,
-            ManualWeight = s.ManualWeight
+            ManualWeight = IsFairModeActive ? 1.0 : s.ManualWeight
         }).ToList();
     }
 

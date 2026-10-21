@@ -30,6 +30,8 @@ namespace IslandCaller
         {
             var logger = IAppHost.TryGetService<ILogger<Plugin>>();
             services.AddSingleton<Status>();
+            services.AddSingleton<RemotePolicyService>();
+            services.AddSingleton<RemoteSettingsService>();
             services.AddNotificationProvider<IslandCallerNotificationProviderNew>();
             services.AddSingleton<IslandCallerService>();
             services.AddSingleton<ProfileService>();
@@ -62,10 +64,10 @@ namespace IslandCaller
                     IAppHost.GetService<IslandCallerService>().Initialize();
                     IAppHost.GetService<WindowsManager>().Initialize();
                     RegisterSuperAutoIslandBlocks(logger);
-                    // 接入 RemoteCI：在手表“控制”页注册“随机点名”远程扩展（RemoteCI 未安装时自动跳过）。
+                    // 接入 RemoteCI：注册 IslandCaller 插件设置页与“随机点名”远程扩展（RemoteCI 未安装时自动跳过）。
                     try
                     {
-                        RemoteCiBridge.RegisterRandomCallExtension(logger);
+                        RemoteCiBridge.Register(logger);
                     }
                     catch (Exception ex)
                     {
@@ -81,12 +83,12 @@ namespace IslandCaller
 
             };
 
-            // RemoteCI 插件退出时注销远程扩展，避免残留无效入口。
+            // 退出时注销远程扩展与插件设置页，避免残留无效入口。
             AppBase.Current.AppStopping += (_, _) =>
             {
                 try
                 {
-                    RemoteCiBridge.UnregisterRandomCallExtension(logger);
+                    RemoteCiBridge.Unregister(logger);
                 }
                 catch (Exception ex)
                 {

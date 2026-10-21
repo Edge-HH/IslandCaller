@@ -9,9 +9,15 @@ namespace IslandCaller.Services
     {
         private ILogger<ProfileService>? Logger { get; set; }
         private Status Status { get; set; }
-        public ProfileService(ILogger<ProfileService> logger)
+        private RemotePolicyService Policy { get; }
+
+        /// <summary>名单文件写入完成后触发，参数为名单 Guid。</summary>
+        public event EventHandler<Guid>? ProfileSaved;
+
+        public ProfileService(ILogger<ProfileService> logger, RemotePolicyService policy)
         {
             Logger = logger;
+            Policy = policy;
             Logger.LogTrace("ProfileService created.");
         }
         internal void Initialize()
@@ -112,6 +118,17 @@ namespace IslandCaller.Services
         public void SaveProfile(Guid guid, List<Person> members)
         {
             members = members.OrderBy(x => x.Id).ToList();
+            if (Policy.IsFairModeActive)
+            {
+                // 公平模式下手动权重一律为 1，任何入口写入的名单都不能带入其他权重。
+                members = members.Select(person => new Person
+                {
+                    Id = person.Id,
+                    Name = person.Name,
+                    Gender = person.Gender,
+                    ManualWeight = 1.0
+                }).ToList();
+            }
             string basePath = GetBasePath();
 
             // 如果目录不存在就创建
@@ -142,6 +159,42 @@ namespace IslandCaller.Services
                 Logger?.LogError(ex, $"写入名单文件失败: {filePath}");
                 throw new Exception($"写入名单文件失败: {filePath}", ex);
             }
+
+            ProfileSaved?.Invoke(this, guid);
+        }
+
+        /// <summary>
+        /// 把所有名单中的手动权重重置为 1（公平模式），返回实际被修改的名单数量。
+        /// 单个名单读写失败只记录日志，不影响其余名单。
+        /// </summary>
+        internal int ResetAllManualWeights()
+        {
+            int changedCount = 0;
+            foreach (Guid profileId in Settings.Instance.Profile.ProfileList.Keys.ToList())
+            {
+                try
+                {
+                    List<Person> members = GetMembers(profileId);
+                    if (members.All(person => person.ManualWeight == 1.0))
+                    {
+                        continue;
+                    }
+
+                    foreach (Person person in members)
+                    {
+                        person.ManualWeight = 1.0;
+                    }
+
+                    SaveProfile(profileId, members);
+                    changedCount++;
+                }
+                catch (Exception ex)
+                {
+                    Logger?.LogWarning(ex, "重置名单 {ProfileGuid} 的手动权重失败", profileId);
+                }
+            }
+
+            return changedCount;
         }
 
         public void CreateDemoProfile(Guid guid)

@@ -1,0 +1,201 @@
+using System.Globalization;
+using static IslandCaller.Services.ProfileService;
+
+namespace IslandCaller.Helpers;
+
+/// <summary>
+/// RemoteCI 插件设置页中名单与手动权重的文本格式：
+/// 名单每行一名学生，写作“姓名”或“姓名,性别”；手动权重每行写作“姓名=权重”。
+/// </summary>
+internal static class RosterTextHelper
+{
+    internal const double MinWeight = 0.0;
+    internal const double MaxWeight = 4.0;
+    private const int MaxNameLength = 50;
+    private const int MaxReportedErrors = 5;
+
+    private static readonly char[] RosterSeparators = [',', '，', '\t'];
+    private static readonly char[] WeightSeparators = ['=', '＝', ':', '：', ',', '，', '\t'];
+
+    internal readonly record struct RosterEntry(string Name, int Gender);
+
+    internal static string FormatRoster(IEnumerable<Person> members) =>
+        string.Join('\n', members
+            .OrderBy(member => member.Id)
+            .Select(member => $"{member.Name},{(member.Gender == 1 ? "女" : "男")}"));
+
+    /// <summary>只输出权重不为 1 的学生，未列出的学生即为默认权重。</summary>
+    internal static string FormatWeights(IEnumerable<Person> members) =>
+        string.Join('\n', members
+            .OrderBy(member => member.Id)
+            .Where(member => !IsDefaultWeight(member.ManualWeight))
+            .Select(member => $"{member.Name}={member.ManualWeight.ToString("0.##", CultureInfo.InvariantCulture)}"));
+
+    internal static bool IsDefaultWeight(double weight) => Math.Abs(weight - 1.0) < 0.0001;
+
+    /// <summary>解析名单文本；格式有误时把错误追加到 errors 并返回 null。</summary>
+    internal static List<RosterEntry>? ParseRoster(string? text, List<string> errors)
+    {
+        int errorCount = errors.Count;
+        var entries = new List<RosterEntry>();
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        var lines = SplitLines(text);
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i].Trim();
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            string[] parts = SplitRosterLine(line);
+            if (parts.Length > 2)
+            {
+                errors.Add($"名单第 {i + 1} 行格式错误，应为“姓名”或“姓名,性别”");
+                continue;
+            }
+
+            string name = parts[0].Trim();
+            if (!IsValidName(name, $"名单第 {i + 1} 行", errors))
+            {
+                continue;
+            }
+
+            int gender = 0;
+            if (parts.Length == 2 && !TryParseGender(parts[1].Trim(), out gender))
+            {
+                errors.Add($"名单第 {i + 1} 行的性别“{parts[1].Trim()}”无法识别，请填写男或女");
+                continue;
+            }
+
+            if (!names.Add(name))
+            {
+                errors.Add($"名单中有重名学生“{name}”，请为重名学生添加区分后缀");
+                continue;
+            }
+
+            entries.Add(new RosterEntry(name, gender));
+        }
+
+        if (entries.Count == 0 && errors.Count == errorCount)
+        {
+            errors.Add("名单不能为空");
+        }
+
+        return errors.Count == errorCount ? entries : null;
+    }
+
+    /// <summary>解析手动权重文本；格式有误时把错误追加到 errors 并返回 null。</summary>
+    internal static Dictionary<string, double>? ParseWeights(string? text, List<string> errors)
+    {
+        int errorCount = errors.Count;
+        var weights = new Dictionary<string, double>(StringComparer.Ordinal);
+        var lines = SplitLines(text);
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i].Trim();
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            // 按最后一个分隔符切分，权重本身不含分隔符。
+            int separator = line.LastIndexOfAny(WeightSeparators);
+            if (separator <= 0 || separator == line.Length - 1)
+            {
+                errors.Add($"手动权重第 {i + 1} 行格式错误，应为“姓名=权重”");
+                continue;
+            }
+
+            string name = line[..separator].Trim();
+            string weightText = line[(separator + 1)..].Trim();
+            if (!IsValidName(name, $"手动权重第 {i + 1} 行", errors))
+            {
+                continue;
+            }
+
+            if (!double.TryParse(weightText, NumberStyles.Float, CultureInfo.InvariantCulture, out double weight) ||
+                !double.IsFinite(weight) || weight < MinWeight || weight > MaxWeight)
+            {
+                errors.Add($"手动权重第 {i + 1} 行的权重“{weightText}”需为 {MinWeight:0} 到 {MaxWeight:0} 之间的数字");
+                continue;
+            }
+
+            if (!weights.TryAdd(name, weight))
+            {
+                errors.Add($"手动权重中“{name}”重复出现");
+            }
+        }
+
+        return errors.Count == errorCount ? weights : null;
+    }
+
+    /// <summary>把多条错误合并为一条回执，过多时只列出前几条。</summary>
+    internal static string JoinErrors(IReadOnlyList<string> errors) =>
+        errors.Count <= MaxReportedErrors
+            ? string.Join("；", errors)
+            : $"{string.Join("；", errors.Take(MaxReportedErrors))}；等共 {errors.Count} 处错误";
+
+    /// <summary>
+    /// 优先按逗号或制表符切分；没有这些分隔符时，“张三 男”这类以空格隔开性别的写法也能识别，
+    /// 而“John Smith”这类含空格的姓名保持不变。
+    /// </summary>
+    private static string[] SplitRosterLine(string line)
+    {
+        if (line.IndexOfAny(RosterSeparators) >= 0)
+        {
+            return line.Split(RosterSeparators);
+        }
+
+        int space = line.LastIndexOfAny([' ', '\u3000']);
+        if (space > 0 && line[(space + 1)..].Trim() is "男" or "女")
+        {
+            return [line[..space], line[(space + 1)..]];
+        }
+
+        return [line];
+    }
+
+    private static bool IsValidName(string name, string location, List<string> errors)
+    {
+        if (name.Length == 0)
+        {
+            errors.Add($"{location}缺少姓名");
+            return false;
+        }
+
+        if (name.Length > MaxNameLength)
+        {
+            errors.Add($"{location}的姓名过长（不能超过 {MaxNameLength} 个字符）");
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryParseGender(string text, out int gender)
+    {
+        switch (text.ToLowerInvariant())
+        {
+            case "":
+            case "男":
+            case "m":
+            case "male":
+            case "0":
+                gender = 0;
+                return true;
+            case "女":
+            case "f":
+            case "female":
+            case "1":
+                gender = 1;
+                return true;
+            default:
+                gender = 0;
+                return false;
+        }
+    }
+
+    private static string[] SplitLines(string? text) =>
+        (text ?? string.Empty).ReplaceLineEndings("\n").Split('\n');
+}

@@ -30,11 +30,33 @@ public partial class SettingPage : SettingsPageBase
         vm = (SettingPageViewModel)DataContext!;
         historyService = IAppHost.GetService<HistoryService>();
         logger = IAppHost.GetService<ILogger<SettingPage>>();
+        // 页面显示期间跟踪 RemoteCI 的锁定、公平模式与远程设置修改。
+        AttachedToVisualTree += (_, _) => vm.Attach();
+        DetachedFromVisualTree += (_, _) => vm.Detach();
         logger.LogInformation("SettingPage 初始化完成");
+    }
+
+    /// <summary>
+    /// 锁定时界面已整体置灰；这里再在事件入口拦截一次，防止锁定生效前已弹出的操作继续执行。
+    /// </summary>
+    private bool IsLocked()
+    {
+        if (!vm.IsSettingsLocked)
+        {
+            return false;
+        }
+
+        logger.LogInformation("设置页已被 RemoteCI 锁定，忽略本次操作");
+        return true;
     }
 
     private async void CreateProfileButton_OnClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
+        if (IsLocked())
+        {
+            return;
+        }
+
         if (GetOwnerWindow() is not Window owner)
         {
             logger.LogError("新建名单失败：无法获取窗口上下文");
@@ -74,7 +96,7 @@ public partial class SettingPage : SettingsPageBase
 
     private async void EditButton_OnClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (sender is not Button { Tag: Guid profileId } || GetOwnerWindow() is not Window owner)
+        if (IsLocked() || sender is not Button { Tag: Guid profileId } || GetOwnerWindow() is not Window owner)
         {
             return;
         }
@@ -93,7 +115,7 @@ public partial class SettingPage : SettingsPageBase
 
     private async void DeleteButton_OnClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (sender is not Button { Tag: Guid profileId } || GetOwnerWindow() is not Window owner)
+        if (IsLocked() || sender is not Button { Tag: Guid profileId } || GetOwnerWindow() is not Window owner)
         {
             return;
         }
@@ -118,7 +140,7 @@ public partial class SettingPage : SettingsPageBase
             DefaultButton = FAContentDialogButton.Secondary
         };
         var result = await dialog.ShowAsync(owner);
-        if (result != FAContentDialogResult.Primary)
+        if (result != FAContentDialogResult.Primary || IsLocked())
         {
             return;
         }
@@ -134,12 +156,17 @@ public partial class SettingPage : SettingsPageBase
 
     private void AddProfilePreferenceRuleButton_OnClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
+        if (IsLocked())
+        {
+            return;
+        }
+
         vm.AddProfilePreferenceRule();
     }
 
     private void DeleteProfilePreferenceRuleButton_OnClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (sender is Button { Tag: SettingPageViewModel.ProfilePreferenceItemViewModel item })
+        if (!IsLocked() && sender is Button { Tag: SettingPageViewModel.ProfilePreferenceItemViewModel item })
         {
             vm.RemoveProfilePreferenceRule(item);
         }
@@ -147,6 +174,11 @@ public partial class SettingPage : SettingsPageBase
 
     private void ClearButton_OnClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
+        if (IsLocked())
+        {
+            return;
+        }
+
         logger.LogInformation("清空点名历史记录");
         historyService.ClearThisLessonHistory();
         historyService.ClearLongTermHistory();
@@ -154,6 +186,11 @@ public partial class SettingPage : SettingsPageBase
 
     private async void ExportSettingsButton_OnClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
+        if (IsLocked())
+        {
+            return;
+        }
+
         var topLevel = TopLevel.GetTopLevel(this) ?? AppBase.Current.GetRootWindow();
         if (topLevel == null)
         {
@@ -205,6 +242,11 @@ public partial class SettingPage : SettingsPageBase
 
     private async void ImportSettingsButton_OnClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
+        if (IsLocked())
+        {
+            return;
+        }
+
         var topLevel = TopLevel.GetTopLevel(this) ?? AppBase.Current.GetRootWindow();
         if (topLevel == null)
         {
@@ -249,7 +291,7 @@ public partial class SettingPage : SettingsPageBase
                 }
             };
 
-            if (!Equals(await confirmation.ShowAsync(), true))
+            if (!Equals(await confirmation.ShowAsync(), true) || IsLocked())
             {
                 return;
             }
