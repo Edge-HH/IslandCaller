@@ -5,6 +5,9 @@ using System.Text;
 
 namespace IslandCaller.Services
 {
+    /// <summary>公平模式重置手动权重的结果：实际被修改的名单数量，以及未能处理的名单。</summary>
+    internal readonly record struct ManualWeightResetResult(int ChangedCount, IReadOnlyList<Guid> FailedProfileIds);
+
     public class ProfileService
     {
         private ILogger<ProfileService>? Logger { get; set; }
@@ -164,12 +167,13 @@ namespace IslandCaller.Services
         }
 
         /// <summary>
-        /// 把所有名单中的手动权重重置为 1（公平模式），返回实际被修改的名单数量。
-        /// 单个名单读写失败只记录日志，不影响其余名单。
+        /// 把所有名单中的手动权重重置为 1（公平模式）。单个名单失败只记录日志、不影响其余名单，
+        /// 失败的名单会在结果中返回，由调用方决定如何向管理员反馈。名单文件不存在时没有权重可清除，不算失败。
         /// </summary>
-        internal int ResetAllManualWeights()
+        internal ManualWeightResetResult ResetAllManualWeights()
         {
             int changedCount = 0;
+            var failedProfileIds = new List<Guid>();
             foreach (Guid profileId in Settings.Instance.Profile.ProfileList.Keys.ToList())
             {
                 try
@@ -188,13 +192,18 @@ namespace IslandCaller.Services
                     SaveProfile(profileId, members);
                     changedCount++;
                 }
+                catch (FileNotFoundException ex)
+                {
+                    Logger?.LogWarning(ex, "名单 {ProfileGuid} 的文件不存在，跳过手动权重重置", profileId);
+                }
                 catch (Exception ex)
                 {
                     Logger?.LogWarning(ex, "重置名单 {ProfileGuid} 的手动权重失败", profileId);
+                    failedProfileIds.Add(profileId);
                 }
             }
 
-            return changedCount;
+            return new ManualWeightResetResult(changedCount, failedProfileIds);
         }
 
         public void CreateDemoProfile(Guid guid)

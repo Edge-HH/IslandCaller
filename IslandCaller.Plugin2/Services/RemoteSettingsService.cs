@@ -245,7 +245,7 @@ internal sealed class RemoteSettingsService
         _policy.IsRemoteManaged = true;
         if (_policy.IsFairModeActive)
         {
-            EnforceFairMode();
+            EnforceFairMode(forceReload: true);
         }
 
         StartTracking();
@@ -354,6 +354,7 @@ internal sealed class RemoteSettingsService
         var settings = Settings.Instance;
         var changed = new List<string>();
         var notes = new List<string>();
+        List<Guid> resetFailures = [];
         Guid defaultProfileId = settings.Profile.DefaultProfile;
         List<ProfileService.Person> currentMembers = [];
         List<ProfileService.Person>? targetMembers = null;
@@ -390,16 +391,30 @@ internal sealed class RemoteSettingsService
                 changed.Add(lockValue ? "锁定设置页" : "解除设置页锁定");
             }
 
-            if (fairMode is { } fairValue && _policy.FairMode != fairValue)
+            if (fairMode is { } fairValue)
             {
-                _policy.FairMode = fairValue;
-                changed.Add(fairValue ? "开启公平模式" : "关闭公平模式");
-                if (_policy.IsFairModeActive)
+                bool fairModeToggled = _policy.FairMode != fairValue;
+                if (fairModeToggled)
                 {
-                    int resetCount = EnforceFairMode();
-                    if (resetCount > 0)
+                    _policy.FairMode = fairValue;
+                    changed.Add(fairValue ? "开启公平模式" : "关闭公平模式");
+                }
+
+                // 即使公平模式此前已开启，重复下发也会重新清除，使上次未能写入的名单可以重试。
+                if (fairValue && _policy.IsFairModeActive)
+                {
+                    ManualWeightResetResult reset = EnforceFairMode(forceReload: fairModeToggled);
+                    resetFailures = [.. reset.FailedProfileIds];
+                    if (reset.ChangedCount > 0)
                     {
-                        notes.Add($"已清除 {resetCount} 个名单的手动权重");
+                        if (fairModeToggled)
+                        {
+                            notes.Add($"已清除 {reset.ChangedCount} 个名单的手动权重");
+                        }
+                        else
+                        {
+                            changed.Add($"清除 {reset.ChangedCount} 个名单的手动权重");
+                        }
                     }
                 }
             }
@@ -408,6 +423,14 @@ internal sealed class RemoteSettingsService
             {
                 // 重新读取：本次开启公平模式时名单文件刚被重置过，对比时应以重置后的内容为准。
                 ApplyMembers(defaultProfileId, ReadMembersOrEmpty(defaultProfileId), targetMembers, changed);
+
+                // 同一请求上传的名单已按公平模式写成权重 1 时，不应再把默认名单报告为清除失败。
+                if (resetFailures.Contains(defaultProfileId) &&
+                    ReadMembersOrEmpty(defaultProfileId) is { Count: > 0 } saved &&
+                    saved.All(member => member.ManualWeight == 1.0))
+                {
+                    resetFailures.Remove(defaultProfileId);
+                }
             }
 
             if (rosterName is not null &&
@@ -486,6 +509,18 @@ internal sealed class RemoteSettingsService
             }
         }
 
+        if (resetFailures.Count > 0)
+        {
+            string failedNames = string.Join("、", resetFailures.Take(5)
+                .Select(id => settings.Profile.ProfileList.GetValueOrDefault(id, id.ToString()))) +
+                (resetFailures.Count > 5 ? " 等" : string.Empty);
+            string applied = changed.Count == 0 ? string.Empty : $"已写入：{string.Join("、", changed)}；";
+            _logger.LogWarning("RemoteCI 用户 {User} 开启公平模式，但 {Count} 个名单的手动权重未能清除：{Names}",
+                requestedBy ?? "未知", resetFailures.Count, failedNames);
+            return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode,
+                $"{applied}公平模式已开启，但以下名单的手动权重未能清除：{failedNames}。请检查名单文件后重新下发公平模式以重试");
+        }
+
         string message = changed.Count == 0 ? "设置无变化" : $"已更新 {changed.Count} 项：{string.Join("、", changed)}";
         if (notes.Count > 0)
         {
@@ -496,13 +531,22 @@ internal sealed class RemoteSettingsService
         return RemoteCommandOutcome.Ok(message);
     }
 
-    /// <summary>把所有名单的手动权重重置为 1，并重新加载当前名单使权重立即生效。返回被修改的名单数量。</summary>
-    private int EnforceFairMode()
+    /// <summary>
+    /// 把所有名单的手动权重重置为 1，并重新加载当前名单（运行时权重在加载时按公平模式计算）。
+    /// 公平模式重复下发且没有任何变化时跳过重载，避免无谓地重载历史记录。
+    /// </summary>
+    /// <param name="forceReload">公平模式刚刚生效（开启或随插件启动）时必须重载，使运行时立即忽略手动权重。</param>
+    private ManualWeightResetResult EnforceFairMode(bool forceReload)
     {
-        int resetCount = _profileService.ResetAllManualWeights();
-        ReloadActiveProfile();
-        _logger.LogInformation("公平模式已生效，重置了 {Count} 个名单的手动权重", resetCount);
-        return resetCount;
+        ManualWeightResetResult result = _profileService.ResetAllManualWeights();
+        if (forceReload || result.ChangedCount > 0 || result.FailedProfileIds.Count > 0)
+        {
+            ReloadActiveProfile();
+        }
+
+        _logger.LogInformation("公平模式已生效，重置了 {Count} 个名单的手动权重，{Failed} 个名单失败",
+            result.ChangedCount, result.FailedProfileIds.Count);
+        return result;
     }
 
     private void ReloadActiveProfile()

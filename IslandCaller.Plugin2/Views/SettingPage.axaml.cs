@@ -151,8 +151,15 @@ public partial class SettingPage : SettingsPageBase
             return;
         }
 
+        // 对话框期间 RemoteCI 可能已改动名单列表（如重命名默认名单），必须基于最新内容删除，不能写回旧快照。
+        var latestProfiles = Settings.Instance.Profile.ProfileList;
+        if (profileId == Settings.Instance.Profile.DefaultProfile || !latestProfiles.ContainsKey(profileId))
+        {
+            return;
+        }
+
         vm.RemoveProfilePreferenceRulesForProfile(profileId);
-        var profileList = new Dictionary<Guid, string>(profile);
+        var profileList = new Dictionary<Guid, string>(latestProfiles);
         profileList.Remove(profileId);
         Settings.Instance.Profile.ProfileList = profileList;
         Settings.Instance.Profile.ProfileNum = profileList.Count;
