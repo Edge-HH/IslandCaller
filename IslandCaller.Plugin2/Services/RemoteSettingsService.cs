@@ -5,6 +5,7 @@ using IslandCaller.Helpers;
 using IslandCaller.Models;
 using IslandCaller.Plugin2;
 using IslandCaller.Plugin2.Helpers;
+using IslandCaller.Views;
 using Microsoft.Extensions.Logging;
 
 namespace IslandCaller.Services;
@@ -217,6 +218,7 @@ internal sealed class RemoteSettingsService
     private readonly ProfileRuntimeService _profileRuntimeService;
     private readonly RemotePolicyService _policy;
     private readonly LiquidGlassRuntime _liquidGlassRuntime;
+    private readonly WindowsManager _windowsManager;
     private readonly ILogger<RemoteSettingsService> _logger;
     private HashSet<Guid> _pendingFairModeFailures = [];
     private SettingsModel? _trackedModel;
@@ -226,12 +228,14 @@ internal sealed class RemoteSettingsService
         ProfileRuntimeService profileRuntimeService,
         RemotePolicyService policy,
         LiquidGlassRuntime liquidGlassRuntime,
+        WindowsManager windowsManager,
         ILogger<RemoteSettingsService> logger)
     {
         _profileService = profileService;
         _profileRuntimeService = profileRuntimeService;
         _policy = policy;
         _liquidGlassRuntime = liquidGlassRuntime;
+        _windowsManager = windowsManager;
         _logger = logger;
     }
 
@@ -343,6 +347,16 @@ internal sealed class RemoteSettingsService
             (showerTheme ?? settings.Call.ShowerTheme) == 1)
         {
             errors.Add("悬浮窗与点名展示窗口不能同时使用 LiquidGlass，请将其中一个改为 Fluent");
+        }
+
+        // 悬浮窗主题一改就会立即重建窗口，而正在显示的点名展示窗口要等本次点名结束才关闭；
+        // 此时把悬浮窗改为 LiquidGlass 会让两个 LiquidGlass 窗口同时存在，需等点名结束后再修改。
+        if (errors.Count == 0 &&
+            hoverTheme == 1 && settings.Hover.HoverTheme != 1 &&
+            _windowsManager.ShowerWindow is LiquidShower)
+        {
+            return RemoteCommandOutcome.Failure(RemoteCommandOutcome.BusyCode,
+                "点名展示窗口正在以 LiquidGlass 显示，请在本次点名结束后再把悬浮窗改为 LiquidGlass");
         }
 
         Guid defaultProfileId = settings.Profile.DefaultProfile;
