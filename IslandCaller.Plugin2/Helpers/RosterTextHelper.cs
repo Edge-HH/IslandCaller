@@ -18,18 +18,30 @@ internal static class RosterTextHelper
     private static readonly char[] WeightSeparators = ['=', '＝', ':', '：', ',', '，', '\t'];
 
     internal readonly record struct RosterEntry(string Name, int Gender);
+    internal readonly record struct WeightEntry(string Name, double Weight);
 
     internal static string FormatRoster(IEnumerable<Person> members) =>
         string.Join('\n', members
             .OrderBy(member => member.Id)
             .Select(member => $"{member.Name},{(member.Gender == 1 ? "女" : "男")}"));
 
-    /// <summary>只输出权重不为 1 的学生，未列出的学生即为默认权重。</summary>
+    /// <summary>通常只输出权重不为 1 的学生；重名名单会输出每一行，保留行序身份。</summary>
     internal static string FormatWeights(IEnumerable<Person> members) =>
-        string.Join('\n', members
-            .OrderBy(member => member.Id)
-            .Where(member => !IsDefaultWeight(member.ManualWeight))
-            .Select(member => $"{member.Name}={member.ManualWeight.ToString("R", CultureInfo.InvariantCulture)}"));
+        string.Join('\n', FormatWeightEntries(members));
+
+    private static IEnumerable<string> FormatWeightEntries(IEnumerable<Person> members)
+    {
+        var ordered = members.OrderBy(member => member.Id).ToList();
+        var duplicateNames = ordered
+            .GroupBy(member => member.Name, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.Ordinal);
+
+        return ordered
+            .Where(member => duplicateNames.Contains(member.Name) || !IsDefaultWeight(member.ManualWeight))
+            .Select(member => $"{member.Name}={member.ManualWeight.ToString("R", CultureInfo.InvariantCulture)}");
+    }
 
     internal static bool IsDefaultWeight(double weight) => Math.Abs(weight - 1.0) < 0.0001;
 
@@ -77,19 +89,14 @@ internal static class RosterTextHelper
             entries.Add(new RosterEntry(name, gender));
         }
 
-        if (entries.Count == 0 && errors.Count == errorCount)
-        {
-            errors.Add("名单不能为空");
-        }
-
         return errors.Count == errorCount ? entries : null;
     }
 
     /// <summary>解析手动权重文本；格式有误时把错误追加到 errors 并返回 null。</summary>
-    internal static Dictionary<string, double>? ParseWeights(string? text, List<string> errors)
+    internal static List<WeightEntry>? ParseWeights(string? text, List<string> errors)
     {
         int errorCount = errors.Count;
-        var weights = new Dictionary<string, double>(StringComparer.Ordinal);
+        var weights = new List<WeightEntry>();
         var lines = SplitLines(text);
         for (int i = 0; i < lines.Length; i++)
         {
@@ -121,10 +128,7 @@ internal static class RosterTextHelper
                 continue;
             }
 
-            if (!weights.TryAdd(name, weight))
-            {
-                errors.Add($"手动权重中“{name}”重复出现");
-            }
+            weights.Add(new WeightEntry(name, weight));
         }
 
         return errors.Count == errorCount ? weights : null;

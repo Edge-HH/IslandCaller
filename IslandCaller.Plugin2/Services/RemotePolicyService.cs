@@ -37,8 +37,8 @@ public sealed class RemotePolicyService : ReactiveObject
                 return;
             }
 
+            Save(value, _lockSettingsPage);
             this.RaiseAndSetIfChanged(ref _fairMode, value);
-            Save();
             this.RaisePropertyChanged(nameof(IsFairModeActive));
         }
     }
@@ -54,8 +54,8 @@ public sealed class RemotePolicyService : ReactiveObject
                 return;
             }
 
+            Save(_fairMode, value);
             this.RaiseAndSetIfChanged(ref _lockSettingsPage, value);
-            Save();
             this.RaisePropertyChanged(nameof(IsSettingsLocked));
         }
     }
@@ -100,17 +100,34 @@ public sealed class RemotePolicyService : ReactiveObject
         }
     }
 
-    private void Save()
+    private void Save(bool fairMode, bool lockSettingsPage)
     {
+        bool wroteFairMode = false;
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
-            key.SetValue(FairModeValueName, _fairMode);
-            key.SetValue(LockSettingsPageValueName, _lockSettingsPage);
+            key.SetValue(FairModeValueName, fairMode);
+            wroteFairMode = true;
+            key.SetValue(LockSettingsPageValueName, lockSettingsPage);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "保存 RemoteCI 管控策略失败");
+            if (wroteFairMode)
+            {
+                try
+                {
+                    using var rollbackKey = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
+                    rollbackKey.SetValue(FairModeValueName, _fairMode);
+                    rollbackKey.SetValue(LockSettingsPageValueName, _lockSettingsPage);
+                }
+                catch (Exception rollbackException)
+                {
+                    _logger.LogError(rollbackException, "回滚 RemoteCI 管控策略失败");
+                }
+            }
+
+            throw;
         }
     }
 }

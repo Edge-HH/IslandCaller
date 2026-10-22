@@ -334,7 +334,7 @@ internal sealed class RemoteSettingsService
         // 公平模式（含本次请求开启的情况）下权重字段在 WebUI 中置灰但仍会随表单提交，此时直接忽略。
         bool fairModeAfterApply = fairMode ?? _policy.FairMode;
         bool weightsIgnored = false;
-        Dictionary<string, double>? weights = null;
+        List<RosterTextHelper.WeightEntry>? weights = null;
         if (values.TryGetValue(WeightsKey, out string? weightsText))
         {
             if (fairModeAfterApply)
@@ -358,12 +358,14 @@ internal sealed class RemoteSettingsService
         List<Guid> resetFailures = [];
         Guid defaultProfileId = settings.Profile.DefaultProfile;
         List<ProfileService.Person> currentMembers = [];
+        bool currentMembersLoaded = false;
         List<ProfileService.Person>? targetMembers = null;
         if (roster is not null || weights is not null)
         {
             try
             {
                 currentMembers = _profileService.GetMembers(defaultProfileId);
+                currentMembersLoaded = true;
             }
             catch (Exception ex) when (roster is not null)
             {
@@ -376,7 +378,7 @@ internal sealed class RemoteSettingsService
                 return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode, "读取本机默认名单失败，无法修改手动权重");
             }
 
-            targetMembers = BuildTargetMembers(currentMembers, roster, weights, fairModeAfterApply, errors, notes);
+            targetMembers = BuildTargetMembers(currentMembers, currentMembersLoaded, roster, weights, fairModeAfterApply, errors, notes);
             if (errors.Count > 0)
             {
                 return RemoteCommandOutcome.Failure(RemoteCommandOutcome.InvalidRequestCode, RosterTextHelper.JoinErrors(errors));
@@ -589,8 +591,9 @@ internal sealed class RemoteSettingsService
 
     private static List<ProfileService.Person> BuildTargetMembers(
         List<ProfileService.Person> currentMembers,
+        bool currentMembersLoaded,
         List<RosterTextHelper.RosterEntry>? roster,
-        Dictionary<string, double>? weights,
+        List<RosterTextHelper.WeightEntry>? weights,
         bool isFairMode,
         List<string> errors,
         List<string> notes)
@@ -608,10 +611,16 @@ internal sealed class RemoteSettingsService
             .Where(group => group.Count() > 1)
             .Select(group => group.Key)
             .ToList() ?? [];
-        if (roster is not null && roster.Count == orderedCurrent.Count && roster.Zip(orderedCurrent).All(pair =>
-                pair.First.Name == pair.Second.Name && pair.First.Gender == pair.Second.Gender))
+        bool rosterMatchesCurrent = roster is not null && roster.Count == orderedCurrent.Count && roster.Zip(orderedCurrent).All(pair =>
+                pair.First.Name == pair.Second.Name && pair.First.Gender == pair.Second.Gender);
+        if (rosterMatchesCurrent)
         {
             roster = null;
+        }
+        else if (roster is { Count: 0 })
+        {
+            errors.Add(currentMembersLoaded ? "名单不能为空" : "无法确认空名单是否为本机默认名单");
+            return [];
         }
         else if (duplicateNames.Count > 0)
         {
@@ -638,7 +647,8 @@ internal sealed class RemoteSettingsService
         if (weights is not null)
         {
             var names = members.Select(member => member.Name).ToHashSet(StringComparer.Ordinal);
-            var unknownNames = weights.Keys.Where(name => !names.Contains(name)).ToList();
+            var unknownNames = weights.Select(entry => entry.Name).Distinct(StringComparer.Ordinal)
+                .Where(name => !names.Contains(name)).ToList();
             if (unknownNames.Count > 0)
             {
                 // 同时上传名单时，被移出名单的学生残留的权重行直接忽略；只改权重时则视为填写错误。
@@ -652,9 +662,40 @@ internal sealed class RemoteSettingsService
                 notes.Add($"已忽略不在名单中的权重：{list}");
             }
 
-            foreach (var member in members)
+            var duplicateWeightNames = weights.GroupBy(entry => entry.Name, StringComparer.Ordinal)
+                .Where(group => group.Count() > 1)
+                .Select(group => group.Key)
+                .ToHashSet(StringComparer.Ordinal);
+            bool preserveDuplicateRows = roster is null && orderedCurrent.Count != names.Count;
+            if (duplicateWeightNames.Count > 0 && !preserveDuplicateRows)
             {
-                member.ManualWeight = weights.GetValueOrDefault(member.Name, 1.0);
+                errors.Add($"手动权重中“{string.Join("、", duplicateWeightNames.Take(5))}”重复出现；只有未修改的重名名单可以按行填写");
+                return members;
+            }
+
+            if (preserveDuplicateRows)
+            {
+                var weightsByName = weights
+                    .GroupBy(entry => entry.Name, StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.Select(entry => entry.Weight).ToList(), StringComparer.Ordinal);
+                var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var member in members)
+                {
+                    int occurrence = occurrences.GetValueOrDefault(member.Name);
+                    occurrences[member.Name] = occurrence + 1;
+                    if (weightsByName.TryGetValue(member.Name, out var rowWeights) && occurrence < rowWeights.Count)
+                    {
+                        member.ManualWeight = rowWeights[occurrence];
+                    }
+                }
+            }
+            else
+            {
+                var weightsByName = weights.ToDictionary(entry => entry.Name, entry => entry.Weight, StringComparer.Ordinal);
+                foreach (var member in members)
+                {
+                    member.ManualWeight = weightsByName.GetValueOrDefault(member.Name, 1.0);
+                }
             }
         }
 
