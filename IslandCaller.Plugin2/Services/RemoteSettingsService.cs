@@ -535,11 +535,11 @@ internal sealed class RemoteSettingsService
                 settings.Profile.ProfileList.TryGetValue(defaultProfileId, out string? currentName) &&
                 currentName != rosterName)
             {
+                changed.Add("名单名称");
                 settings.Profile.ProfileList = new Dictionary<Guid, string>(settings.Profile.ProfileList)
                 {
                     [defaultProfileId] = rosterName
                 };
-                changed.Add("名单名称");
             }
 
             if (weightsIgnored)
@@ -596,8 +596,10 @@ internal sealed class RemoteSettingsService
         catch (Exception ex)
         {
             _logger.LogError(ex, "写入 RemoteCI 下发的 IslandCaller 设置失败");
-            string applied = changed.Count == 0 ? string.Empty : $"已写入：{string.Join("、", changed)}；";
-            return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode, $"{applied}写入设置时出错：{ex.Message}");
+            // 各项在写入前就已记录：出错的那一项可能已在本机生效但未保存，回执如实提示重启后可能恢复。
+            string applied = changed.Count == 0 ? string.Empty : $"已修改：{string.Join("、", changed)}；";
+            return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode,
+                $"{applied}写入设置时出错，部分修改可能未能保存，重启后可能恢复原值：{ex.Message}");
         }
         finally
         {
@@ -841,8 +843,8 @@ internal sealed class RemoteSettingsService
             return;
         }
 
-        _profileService.SaveProfile(profileId, targetMembers);
         changed.Add(membersChanged ? "学生名单" : "手动权重");
+        _profileService.SaveProfile(profileId, targetMembers);
         if (_profileService.ActiveProfileId == profileId)
         {
             ReloadActiveProfile();
@@ -904,8 +906,9 @@ internal sealed class RemoteSettingsService
             return;
         }
 
-        set(newValue);
+        // 先记录再赋值：模型赋值后才由 Settings.Save 写入注册表，写入抛出时这一项已在本机生效，回执需要列出。
         changed.Add(label);
+        set(newValue);
     }
 
     private static void SetText(string? value, string current, Action<string> set, string label, List<string> changed)
@@ -915,8 +918,8 @@ internal sealed class RemoteSettingsService
             return;
         }
 
-        set(value);
         changed.Add(label);
+        set(value);
     }
 
     private static bool? ReadSwitch(IReadOnlyDictionary<string, string?> values, string key, List<string> errors)
