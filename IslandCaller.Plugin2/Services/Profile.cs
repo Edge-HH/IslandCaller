@@ -65,8 +65,12 @@ namespace IslandCaller.Services
         }
 
         // 获取名单
-        public List<Person> GetMembers(Guid guid)
+        public List<Person> GetMembers(Guid guid) => GetMembers(guid, out _);
+
+        /// <param name="skippedRows">因格式错误被跳过的行数；按解析结果重写整个文件会丢失这些行。</param>
+        internal List<Person> GetMembers(Guid guid, out int skippedRows)
         {
+            skippedRows = 0;
             string filePath = GetFilePath(guid);
 
             if (!File.Exists(filePath))
@@ -102,6 +106,7 @@ namespace IslandCaller.Services
                 if (parts.Length != 4)
                 {
                     Logger?.LogWarning($"第 {i + 1} 行格式错误: {line}");
+                    skippedRows++;
                     continue;
                 }
 
@@ -178,18 +183,14 @@ namespace IslandCaller.Services
             {
                 try
                 {
+                    // GetMembers 同时校验文件格式；无法解析的名单在这里抛出并计为失败。
                     List<Person> members = GetMembers(profileId);
                     if (members.All(person => person.ManualWeight == 1.0))
                     {
                         continue;
                     }
 
-                    foreach (Person person in members)
-                    {
-                        person.ManualWeight = 1.0;
-                    }
-
-                    SaveProfile(profileId, members);
+                    ResetManualWeightsInFile(profileId);
                     changedCount++;
                 }
                 catch (FileNotFoundException ex)
@@ -204,6 +205,38 @@ namespace IslandCaller.Services
             }
 
             return new ManualWeightResetResult(changedCount, failedProfileIds);
+        }
+
+        /// <summary>
+        /// 只把名单文件中学生行的权重列改为 1，其余内容原样保留。GetMembers 会跳过格式错误的行，
+        /// 若按解析结果重写整个文件，开启公平模式就会把这些行永久删除。
+        /// </summary>
+        private void ResetManualWeightsInFile(Guid guid)
+        {
+            string filePath = GetFilePath(guid);
+            string[] lines = File.ReadAllLines(filePath);
+            for (int i = 1; i < lines.Length; i++)
+            {
+                // 与 GetMembers 相同的判定：恰好 4 列的行才是学生行。
+                string[] parts = lines[i].Trim().Split(',');
+                if (parts.Length == 4)
+                {
+                    parts[3] = "1";
+                    lines[i] = string.Join(',', parts);
+                }
+            }
+
+            try
+            {
+                File.WriteAllLines(filePath, lines, Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                Logger?.LogError(ex, $"写入名单文件失败: {filePath}");
+                throw new Exception($"写入名单文件失败: {filePath}", ex);
+            }
+
+            ProfileSaved?.Invoke(this, guid);
         }
 
         public void CreateDemoProfile(Guid guid)

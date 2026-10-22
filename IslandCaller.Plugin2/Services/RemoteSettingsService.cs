@@ -336,12 +336,13 @@ internal sealed class RemoteSettingsService
         string? rosterText = ReadText(values, RosterKey);
         string? weightsText = ReadText(values, WeightsKey);
         List<ProfileService.Person>? currentMembers = null;
+        int skippedRows = 0;
         Exception? currentMembersError = null;
         if (rosterText is not null || weightsText is not null)
         {
             try
             {
-                currentMembers = _profileService.GetMembers(defaultProfileId);
+                currentMembers = _profileService.GetMembers(defaultProfileId, out skippedRows);
             }
             catch (Exception ex)
             {
@@ -412,6 +413,28 @@ internal sealed class RemoteSettingsService
             if (errors.Count > 0)
             {
                 return RemoteCommandOutcome.Failure(RemoteCommandOutcome.InvalidRequestCode, RosterTextHelper.JoinErrors(errors));
+            }
+
+            // 名单文件中有格式错误的行时，保存会按解析结果重写整个文件并丢失这些行：
+            // 上传新名单是管理员明确的整体替换，可以覆盖；只改权重则拒绝，避免顺带删除学生。
+            if (skippedRows > 0 && currentMembers is not null)
+            {
+                var ordered = currentMembers.OrderBy(member => member.Id).ToList();
+                bool keepsRoster = ordered.Count == targetMembers.Count && ordered.Zip(targetMembers).All(pair =>
+                    pair.First.Id == pair.Second.Id &&
+                    pair.First.Name == pair.Second.Name &&
+                    pair.First.Gender == pair.Second.Gender);
+                if (!keepsRoster)
+                {
+                    notes.Add($"原名单文件中 {skippedRows} 行格式错误，已随新名单一并覆盖");
+                }
+                else if (!fairModeAfterApply &&
+                         ordered.Zip(targetMembers).Any(pair => pair.First.ManualWeight != pair.Second.ManualWeight))
+                {
+                    return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode,
+                        $"本机默认名单文件中有 {skippedRows} 行格式错误，为避免保存时丢失这些行，未修改手动权重。" +
+                        "请在本机检查名单文件，或在“学生名单”中上传完整名单覆盖");
+                }
             }
         }
 
