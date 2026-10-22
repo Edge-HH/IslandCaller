@@ -43,12 +43,16 @@ internal sealed class RemoteSettingsService
     private const string TtsSection = "TTS 设置";
     private const string RosterSection = "名单";
 
+    // 步长与本机设置页滑块的刻度一致；WebUI 数字框按步长校验，取值必须落在刻度上才能整表提交。
     private const double MinHoverScale = 0.5;
     private const double MaxHoverScale = 2.0;
+    private const double HoverScaleStep = 0.05;
     private const double MinBaseTime = 0.0;
     private const double MaxBaseTime = 5.0;
+    private const double BaseTimeStep = 0.05;
     private const double MinAdditionalTime = -5.0;
     private const double MaxAdditionalTime = 8.0;
+    private const double AdditionalTimeStep = 0.1;
 
     // 选项值写入 WebUI 与批量下发记录，一经发布应保持稳定；下标与本机设置中的整数取值一一对应。
     private static readonly string[] HoverLayoutOptions = ["full", "compact", "mini"];
@@ -99,7 +103,7 @@ internal sealed class RemoteSettingsService
             Description = "调整悬浮窗大小，以适配不同的屏幕",
             Min = MinHoverScale,
             Max = MaxHoverScale,
-            Step = 0.05,
+            Step = HoverScaleStep,
             Slider = true
         },
         new(HoverLayoutKey, "悬浮窗布局", RemoteSettingFieldType.Select)
@@ -148,7 +152,7 @@ internal sealed class RemoteSettingsService
             CardDescription = "单次点名提醒的总时长为 {人数 × 基础时间 + 附加时间}",
             Min = MinBaseTime,
             Max = MaxBaseTime,
-            Step = 0.05,
+            Step = BaseTimeStep,
             Slider = true
         },
         new(AdditionalTimeKey, "附加时间（秒）", RemoteSettingFieldType.Number)
@@ -158,7 +162,7 @@ internal sealed class RemoteSettingsService
             Card = "点名提醒时长",
             Min = MinAdditionalTime,
             Max = MaxAdditionalTime,
-            Step = 0.1,
+            Step = AdditionalTimeStep,
             Slider = true
         },
 
@@ -189,9 +193,9 @@ internal sealed class RemoteSettingsService
             Card = "默认名单",
             CardDescription = "远程查看、编辑或上传本机默认名单；其他名单与按科目切换规则请在本机设置中管理"
         },
+        // 不设为必填：本机名单可以没有学生，必填会让整表提交在 RemoteCI 校验时就被拒绝；非空由 Apply 校验。
         new(RosterKey, "学生名单", RemoteSettingFieldType.Text)
         {
-            Required = true,
             Multiline = true,
             Section = RosterSection,
             Card = "默认名单",
@@ -309,14 +313,14 @@ internal sealed class RemoteSettingsService
         bool? breakDisable = ReadSwitch(values, BreakDisableKey, errors);
         bool? interruptable = ReadSwitch(values, InterruptableKey, errors);
         bool? hoverEnable = ReadSwitch(values, HoverEnableKey, errors);
-        double? hoverScale = ReadNumber(values, HoverScaleKey, MinHoverScale, MaxHoverScale, errors);
+        double? hoverScale = ReadNumber(values, HoverScaleKey, MinHoverScale, MaxHoverScale, HoverScaleStep, errors);
         int? hoverLayout = ReadSelect(values, HoverLayoutKey, HoverLayoutOptions, errors);
         int? hoverTheme = ReadSelect(values, HoverThemeKey, ThemeOptions, errors);
         bool? notifyClassIsland = ReadSwitch(values, NotifyClassIslandKey, errors);
         bool? notifyIslandCaller = ReadSwitch(values, NotifyIslandCallerKey, errors);
         int? showerTheme = ReadSelect(values, ShowerThemeKey, ThemeOptions, errors);
-        double? baseTime = ReadNumber(values, BaseTimeKey, MinBaseTime, MaxBaseTime, errors);
-        double? additionalTime = ReadNumber(values, AdditionalTimeKey, MinAdditionalTime, MaxAdditionalTime, errors);
+        double? baseTime = ReadNumber(values, BaseTimeKey, MinBaseTime, MaxBaseTime, BaseTimeStep, errors);
+        double? additionalTime = ReadNumber(values, AdditionalTimeKey, MinAdditionalTime, MaxAdditionalTime, AdditionalTimeStep, errors);
         int? ttsProvider = ReadSelect(values, TtsProviderKey, TtsProviderOptions, errors);
         string? ttsBefore = ReadText(values, TtsBeforeKey);
         string? ttsAfter = ReadText(values, TtsAfterKey);
@@ -327,7 +331,41 @@ internal sealed class RemoteSettingsService
             errors.Add("“名单名称”不能为空");
         }
 
-        List<RosterTextHelper.RosterEntry>? roster = values.TryGetValue(RosterKey, out string? rosterText)
+        var settings = Settings.Instance;
+        Guid defaultProfileId = settings.Profile.DefaultProfile;
+        string? rosterText = ReadText(values, RosterKey);
+        string? weightsText = ReadText(values, WeightsKey);
+        List<ProfileService.Person>? currentMembers = null;
+        Exception? currentMembersError = null;
+        if (rosterText is not null || weightsText is not null)
+        {
+            try
+            {
+                currentMembers = _profileService.GetMembers(defaultProfileId);
+            }
+            catch (Exception ex)
+            {
+                currentMembersError = ex;
+            }
+
+            // WebUI 单班表单会原样提交全部字段：与 GetValues 输出一致的名单和权重视为未修改，不再按上传格式解析，
+            // 使含全角逗号、首尾空格等无法按上传格式精确表达的本机名单也能随其他设置一起往返。
+            if (currentMembers is not null)
+            {
+                if (RosterTextHelper.IsUnchanged(rosterText, RosterTextHelper.FormatRoster(currentMembers)))
+                {
+                    rosterText = null;
+                }
+
+                if (!_policy.IsFairModeActive &&
+                    RosterTextHelper.IsUnchanged(weightsText, RosterTextHelper.FormatWeights(currentMembers)))
+                {
+                    weightsText = null;
+                }
+            }
+        }
+
+        List<RosterTextHelper.RosterEntry>? roster = rosterText is not null
             ? RosterTextHelper.ParseRoster(rosterText, errors, allowDuplicateNames: true, allowBlankNames: true)
             : null;
 
@@ -335,7 +373,7 @@ internal sealed class RemoteSettingsService
         bool fairModeAfterApply = fairMode ?? _policy.FairMode;
         bool weightsIgnored = false;
         List<RosterTextHelper.WeightEntry>? weights = null;
-        if (values.TryGetValue(WeightsKey, out string? weightsText))
+        if (weightsText is not null)
         {
             if (fairModeAfterApply)
             {
@@ -352,33 +390,25 @@ internal sealed class RemoteSettingsService
             return RemoteCommandOutcome.Failure(RemoteCommandOutcome.InvalidRequestCode, RosterTextHelper.JoinErrors(errors));
         }
 
-        var settings = Settings.Instance;
         var changed = new List<string>();
         var notes = new List<string>();
         List<Guid> resetFailures = [];
-        Guid defaultProfileId = settings.Profile.DefaultProfile;
-        List<ProfileService.Person> currentMembers = [];
-        bool currentMembersLoaded = false;
         List<ProfileService.Person>? targetMembers = null;
         if (roster is not null || weights is not null)
         {
-            try
+            if (currentMembersError is not null)
             {
-                currentMembers = _profileService.GetMembers(defaultProfileId);
-                currentMembersLoaded = true;
-            }
-            catch (Exception ex) when (roster is not null)
-            {
+                if (roster is null)
+                {
+                    _logger.LogWarning(currentMembersError, "读取默认名单失败，无法修改手动权重");
+                    return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode, "读取本机默认名单失败，无法修改手动权重");
+                }
+
                 // 默认名单文件损坏时仍允许直接上传新名单覆盖。
-                _logger.LogWarning(ex, "读取默认名单失败，将直接使用 RemoteCI 上传的名单");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "读取默认名单失败，无法修改手动权重");
-                return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode, "读取本机默认名单失败，无法修改手动权重");
+                _logger.LogWarning(currentMembersError, "读取默认名单失败，将直接使用 RemoteCI 上传的名单");
             }
 
-            targetMembers = BuildTargetMembers(currentMembers, currentMembersLoaded, roster, weights, fairModeAfterApply, errors, notes);
+            targetMembers = BuildTargetMembers(currentMembers ?? [], currentMembers is not null, roster, weights, fairModeAfterApply, errors, notes);
             if (errors.Count > 0)
             {
                 return RemoteCommandOutcome.Failure(RemoteCommandOutcome.InvalidRequestCode, RosterTextHelper.JoinErrors(errors));
@@ -401,9 +431,11 @@ internal sealed class RemoteSettingsService
                     _pendingFairModeFailures = [.. EnforceFairMode(forceReload: false).FailedProfileIds];
                     if (_pendingFairModeFailures.Count > 0)
                     {
+                        // 锁定开关可能已在上面写入，回执需如实列出，其余设置本次不再写入。
                         string failedNames = FormatFailedProfileNames(_pendingFairModeFailures, settings);
+                        string applied = changed.Count == 0 ? string.Empty : $"已写入：{string.Join("、", changed)}；";
                         return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode,
-                            $"公平模式仍有名单的手动权重未能清除：{failedNames}。请检查名单文件后重试");
+                            $"{applied}公平模式仍有名单的手动权重未能清除：{failedNames}，未关闭公平模式。请检查名单文件后重试");
                     }
                 }
 
@@ -680,18 +712,31 @@ internal sealed class RemoteSettingsService
 
             if (preserveDuplicateRows)
             {
+                // 重名学生按出现顺序逐行对应；与其他学生一样，未列出的行恢复为 1。
                 var weightsByName = weights
                     .GroupBy(entry => entry.Name, StringComparer.Ordinal)
                     .ToDictionary(group => group.Key, group => group.Select(entry => entry.Weight).ToList(), StringComparer.Ordinal);
+                var memberCounts = members
+                    .GroupBy(member => member.Name, StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+                var extraRows = weightsByName
+                    .Where(pair => pair.Value.Count > memberCounts.GetValueOrDefault(pair.Key))
+                    .Select(pair => pair.Key)
+                    .ToList();
+                if (extraRows.Count > 0)
+                {
+                    errors.Add($"手动权重中“{string.Join("、", extraRows.Take(5))}”的行数多于名单中的同名学生");
+                    return members;
+                }
+
                 var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
                 foreach (var member in members)
                 {
                     int occurrence = occurrences.GetValueOrDefault(member.Name);
                     occurrences[member.Name] = occurrence + 1;
-                    if (weightsByName.TryGetValue(member.Name, out var rowWeights) && occurrence < rowWeights.Count)
-                    {
-                        member.ManualWeight = rowWeights[occurrence];
-                    }
+                    member.ManualWeight = weightsByName.TryGetValue(member.Name, out var rowWeights) && occurrence < rowWeights.Count
+                        ? rowWeights[occurrence]
+                        : 1.0;
                 }
             }
             else
@@ -738,8 +783,9 @@ internal sealed class RemoteSettingsService
             pair.First.Id != pair.Second.Id ||
             pair.First.Name != pair.Second.Name ||
             pair.First.Gender != pair.Second.Gender);
+        // 权重按原值精确比较：文本格式往返不丢精度，微小但有效的修改也必须写入。
         bool weightsChanged = !membersChanged && current.Zip(targetMembers).Any(pair =>
-            Math.Abs(pair.First.ManualWeight - pair.Second.ManualWeight) > 0.0001);
+            pair.First.ManualWeight != pair.Second.ManualWeight);
         if (!membersChanged && !weightsChanged)
         {
             return;
@@ -839,8 +885,13 @@ internal sealed class RemoteSettingsService
         return null;
     }
 
+    /// <summary>
+    /// 读取数字字段：取值必须在范围内且落在步长刻度上（只容许浮点运算误差），
+    /// 否则 GetValues 回传的值会被 WebUI 数字框判为无效，整表无法再次提交。
+    /// 合法值原样返回，本机滑块产生的值因此能精确往返，不会被误报为已修改。
+    /// </summary>
     private static double? ReadNumber(
-        IReadOnlyDictionary<string, string?> values, string key, double min, double max, List<string> errors)
+        IReadOnlyDictionary<string, string?> values, string key, double min, double max, double step, List<string> errors)
     {
         if (!values.TryGetValue(key, out string? raw))
         {
@@ -850,10 +901,14 @@ internal sealed class RemoteSettingsService
         if (double.TryParse(raw?.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double value) &&
             double.IsFinite(value) && value >= min && value <= max)
         {
-            return value;
+            double nearestTick = min + Math.Round((value - min) / step) * step;
+            if (Math.Abs(value - nearestTick) <= step * 1e-9)
+            {
+                return value;
+            }
         }
 
-        errors.Add($"“{LabelOf(key)}”需为 {FormatNumber(min)} 到 {FormatNumber(max)} 之间的数字");
+        errors.Add($"“{LabelOf(key)}”需为 {FormatNumber(min)} 到 {FormatNumber(max)} 之间、步长为 {FormatNumber(step)} 的数字");
         return null;
     }
 
@@ -888,6 +943,10 @@ internal sealed class RemoteSettingsService
     private static string FormatBool(bool value) => value ? "true" : "false";
 
     private static string FormatNumber(double value) =>
+        value.ToString("R", CultureInfo.InvariantCulture);
+
+    /// <summary>float 设置按自身精度输出，避免扩宽为 double 后出现 0.3499999940395355 这类无法通过步长校验的值。</summary>
+    private static string FormatNumber(float value) =>
         value.ToString("R", CultureInfo.InvariantCulture);
 
     private static string OptionAt(IReadOnlyList<string> options, int index) =>

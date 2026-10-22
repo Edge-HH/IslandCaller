@@ -43,7 +43,15 @@ internal static class RosterTextHelper
             .Select(member => $"{member.Name}={member.ManualWeight.ToString("R", CultureInfo.InvariantCulture)}");
     }
 
-    internal static bool IsDefaultWeight(double weight) => Math.Abs(weight - 1.0) < 0.0001;
+    /// <summary>手动权重按原值精确比较，避免把微小的有效修改当作默认值丢弃。</summary>
+    internal static bool IsDefaultWeight(double weight) => weight == 1.0;
+
+    /// <summary>
+    /// 判断提交的文本是否与本机当前值格式化后的结果一致（忽略换行符差异与首尾空行）。
+    /// WebUI 单班表单会原样提交全部字段，一致即表示管理员没有修改，不必按上传格式重新解析。
+    /// </summary>
+    internal static bool IsUnchanged(string? submitted, string formatted) =>
+        string.Equals(NormalizeText(submitted), NormalizeText(formatted), StringComparison.Ordinal);
 
     /// <summary>解析名单文本；格式有误时把错误追加到 errors 并返回 null。</summary>
     internal static List<RosterEntry>? ParseRoster(
@@ -65,14 +73,15 @@ internal static class RosterTextHelper
             }
 
             string[] parts = SplitRosterLine(line);
-            if (parts.Length > 2)
+            string name = parts[0].Trim();
+            // 名单文件以英文逗号分隔字段，姓名中不能再出现英文逗号。
+            if (name.Contains(','))
             {
                 errors.Add($"名单第 {i + 1} 行格式错误，应为“姓名”或“姓名,性别”");
                 continue;
             }
 
-            string name = parts[0].Trim();
-            if (!allowBlankNames && !IsValidName(name, $"名单第 {i + 1} 行", errors))
+            if (!IsValidName(name, $"名单第 {i + 1} 行", errors, allowBlankNames))
             {
                 continue;
             }
@@ -120,7 +129,7 @@ internal static class RosterTextHelper
 
             string name = line[..separator].Trim();
             string weightText = line[(separator + 1)..].Trim();
-            if (!allowBlankNames && !IsValidName(name, $"手动权重第 {i + 1} 行", errors))
+            if (!IsValidName(name, $"手动权重第 {i + 1} 行", errors, allowBlankNames))
             {
                 continue;
             }
@@ -145,14 +154,15 @@ internal static class RosterTextHelper
             : $"{string.Join("；", errors.Take(MaxReportedErrors))}；等共 {errors.Count} 处错误";
 
     /// <summary>
-    /// 优先按逗号或制表符切分；没有这些分隔符时，“张三 男”这类以空格隔开性别的写法也能识别，
-    /// 而“John Smith”这类含空格的姓名保持不变。
+    /// 优先按最后一个逗号或制表符切出性别，姓名中的全角逗号等字符因此可以原样保留；
+    /// 没有这些分隔符时，“张三 男”这类以空格隔开性别的写法也能识别，而“John Smith”这类含空格的姓名保持不变。
     /// </summary>
     private static string[] SplitRosterLine(string line)
     {
-        if (line.IndexOfAny(RosterSeparators) >= 0)
+        int separator = line.LastIndexOfAny(RosterSeparators);
+        if (separator >= 0)
         {
-            return line.Split(RosterSeparators);
+            return [line[..separator], line[(separator + 1)..]];
         }
 
         int space = line.LastIndexOfAny([' ', '\u3000']);
@@ -164,10 +174,15 @@ internal static class RosterTextHelper
         return [line];
     }
 
-    private static bool IsValidName(string name, string location, List<string> errors)
+    private static bool IsValidName(string name, string location, List<string> errors, bool allowBlank)
     {
         if (name.Length == 0)
         {
+            if (allowBlank)
+            {
+                return true;
+            }
+
             errors.Add($"{location}缺少姓名");
             return false;
         }
@@ -206,4 +221,7 @@ internal static class RosterTextHelper
 
     private static string[] SplitLines(string? text) =>
         (text ?? string.Empty).ReplaceLineEndings("\n").Split('\n');
+
+    private static string NormalizeText(string? text) =>
+        (text ?? string.Empty).ReplaceLineEndings("\n").Trim('\n');
 }
