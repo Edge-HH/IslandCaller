@@ -35,6 +35,7 @@ public class ProfileEditorViewModel : ReactiveObject
 
     /// <summary>编辑器最近一次与磁盘同步时的名单内容与名称，用于识别外部修改。</summary>
     private List<Person> _baselineMembers;
+    private List<Guid> _baselineRowKeys;
     private string _baselineName;
 
     /// <summary>RemoteCI 公平模式生效时手动权重固定为 1，不允许编辑。</summary>
@@ -66,9 +67,12 @@ public class ProfileEditorViewModel : ReactiveObject
         ProfileName = profileName;
         _baselineName = profileName;
         _baselineMembers = _profileService.GetMembers(profileId);
-        ProfileList = new ObservableCollection<StudentModel>(_baselineMembers
+        var initialModels = _baselineMembers
             .OrderBy(m => m.Id)
-            .Select(ToStudentModel));
+            .Select(member => ToStudentModel(member))
+            .ToList();
+        ProfileList = new ObservableCollection<StudentModel>(initialModels);
+        _baselineRowKeys = initialModels.Select(model => model.RowKey).ToList();
 
         RowCommand = new RelayCommand<StudentModel>(RemoveStudent);
         _policy.PropertyChanged += PolicyOnPropertyChanged;
@@ -150,10 +154,12 @@ public class ProfileEditorViewModel : ReactiveObject
         {
             // 公平模式重置只改变磁盘上的权重；合并这些权重，保留编辑器中尚未保存的新增、改名和性别修改。
             _baselineMembers = latest;
-            var weightsById = latest.ToDictionary(member => member.Id, member => member.ManualWeight);
+            var weightsByRowKey = _baselineRowKeys
+                .Zip(latest.OrderBy(member => member.Id))
+                .ToDictionary(pair => pair.First, pair => pair.Second.ManualWeight);
             foreach (var student in ProfileList)
             {
-                if (weightsById.TryGetValue(student.ID, out double weight))
+                if (weightsByRowKey.TryGetValue(student.RowKey, out double weight))
                 {
                     student.ManualWeight = weight;
                 }
@@ -165,7 +171,14 @@ public class ProfileEditorViewModel : ReactiveObject
         _baselineMembers = latest;
         if (!SameMembers(latest, ToMembers()))
         {
-            ReplaceMembers(latest);
+            ReplaceMembers(latest, resetBaselineRows: true);
+        }
+        else
+        {
+            _baselineRowKeys = ProfileList
+                .OrderBy(model => model.ID)
+                .Select(model => model.RowKey)
+                .ToList();
         }
     }
 
@@ -225,11 +238,21 @@ public class ProfileEditorViewModel : ReactiveObject
         });
     }
 
-    public void ReplaceMembers(IEnumerable<Person> members)
+    public void ReplaceMembers(IEnumerable<Person> members, bool resetBaselineRows = false)
     {
-        ProfileList = new ObservableCollection<StudentModel>(members
+        var previousRowKeys = resetBaselineRows
+            ? []
+            : ProfileList.Select(model => model.RowKey).ToList();
+        var models = members
             .OrderBy(m => m.Id)
-            .Select(ToStudentModel));
+            .Select((member, index) => ToStudentModel(member,
+                index < previousRowKeys.Count ? previousRowKeys[index] : null))
+            .ToList();
+        ProfileList = new ObservableCollection<StudentModel>(models);
+        if (resetBaselineRows)
+        {
+            _baselineRowKeys = models.Select(model => model.RowKey).ToList();
+        }
     }
 
     public List<Person> ToMembers()
@@ -251,9 +274,9 @@ public class ProfileEditorViewModel : ReactiveObject
         }
     }
 
-    private static StudentModel ToStudentModel(Person member)
+    private static StudentModel ToStudentModel(Person member, Guid? rowKey = null)
     {
-        return new StudentModel
+        return new StudentModel(rowKey)
         {
             ID = member.Id,
             Name = member.Name,
@@ -264,6 +287,13 @@ public class ProfileEditorViewModel : ReactiveObject
 
     public class StudentModel : ReactiveObject
     {
+        public Guid RowKey { get; }
+
+        public StudentModel(Guid? rowKey = null)
+        {
+            RowKey = rowKey ?? Guid.NewGuid();
+        }
+
         public int ID
         {
             get => field;

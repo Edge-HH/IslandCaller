@@ -46,7 +46,11 @@ internal static class RosterTextHelper
     internal static bool IsDefaultWeight(double weight) => Math.Abs(weight - 1.0) < 0.0001;
 
     /// <summary>解析名单文本；格式有误时把错误追加到 errors 并返回 null。</summary>
-    internal static List<RosterEntry>? ParseRoster(string? text, List<string> errors, bool allowDuplicateNames = false)
+    internal static List<RosterEntry>? ParseRoster(
+        string? text,
+        List<string> errors,
+        bool allowDuplicateNames = false,
+        bool allowBlankNames = false)
     {
         int errorCount = errors.Count;
         var entries = new List<RosterEntry>();
@@ -68,7 +72,7 @@ internal static class RosterTextHelper
             }
 
             string name = parts[0].Trim();
-            if (!IsValidName(name, $"名单第 {i + 1} 行", errors))
+            if (!allowBlankNames && !IsValidName(name, $"名单第 {i + 1} 行", errors))
             {
                 continue;
             }
@@ -93,7 +97,7 @@ internal static class RosterTextHelper
     }
 
     /// <summary>解析手动权重文本；格式有误时把错误追加到 errors 并返回 null。</summary>
-    internal static List<WeightEntry>? ParseWeights(string? text, List<string> errors)
+    internal static List<WeightEntry>? ParseWeights(string? text, List<string> errors, bool allowBlankNames = false)
     {
         int errorCount = errors.Count;
         var weights = new List<WeightEntry>();
@@ -108,7 +112,7 @@ internal static class RosterTextHelper
 
             // 按最后一个分隔符切分，权重本身不含分隔符。
             int separator = line.LastIndexOfAny(WeightSeparators);
-            if (separator <= 0 || separator == line.Length - 1)
+            if (separator < 0 || (!allowBlankNames && separator == 0) || separator == line.Length - 1)
             {
                 errors.Add($"手动权重第 {i + 1} 行格式错误，应为“姓名=权重”");
                 continue;
@@ -116,7 +120,7 @@ internal static class RosterTextHelper
 
             string name = line[..separator].Trim();
             string weightText = line[(separator + 1)..].Trim();
-            if (!IsValidName(name, $"手动权重第 {i + 1} 行", errors))
+            if (!allowBlankNames && !IsValidName(name, $"手动权重第 {i + 1} 行", errors))
             {
                 continue;
             }

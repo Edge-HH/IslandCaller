@@ -328,7 +328,7 @@ internal sealed class RemoteSettingsService
         }
 
         List<RosterTextHelper.RosterEntry>? roster = values.TryGetValue(RosterKey, out string? rosterText)
-            ? RosterTextHelper.ParseRoster(rosterText, errors, allowDuplicateNames: true)
+            ? RosterTextHelper.ParseRoster(rosterText, errors, allowDuplicateNames: true, allowBlankNames: true)
             : null;
 
         // 公平模式（含本次请求开启的情况）下权重字段在 WebUI 中置灰但仍会随表单提交，此时直接忽略。
@@ -343,7 +343,7 @@ internal sealed class RemoteSettingsService
             }
             else
             {
-                weights = RosterTextHelper.ParseWeights(weightsText, errors);
+                weights = RosterTextHelper.ParseWeights(weightsText, errors, allowBlankNames: true);
             }
         }
 
@@ -622,6 +622,11 @@ internal sealed class RemoteSettingsService
             errors.Add(currentMembersLoaded ? "名单不能为空" : "无法确认空名单是否为本机默认名单");
             return [];
         }
+        else if (roster?.Any(entry => entry.Name.Length == 0) == true)
+        {
+            errors.Add("名单中姓名不能为空");
+            return [];
+        }
         else if (duplicateNames.Count > 0)
         {
             errors.Add($"名单中有重名学生“{string.Join("、", duplicateNames.Take(5))}”，新名单不能包含重名");
@@ -883,7 +888,7 @@ internal sealed class RemoteSettingsService
     private static string FormatBool(bool value) => value ? "true" : "false";
 
     private static string FormatNumber(double value) =>
-        Math.Round(value, 3).ToString("0.###", CultureInfo.InvariantCulture);
+        value.ToString("R", CultureInfo.InvariantCulture);
 
     private static string OptionAt(IReadOnlyList<string> options, int index) =>
         options[Math.Clamp(index, 0, options.Count - 1)];
