@@ -332,6 +332,19 @@ internal sealed class RemoteSettingsService
         }
 
         var settings = Settings.Instance;
+
+        // 悬浮窗与展示窗口同时使用 LiquidGlass 会触发已知的崩溃问题，远程修改不能新造出这种组合。
+        // 只拦截本次把某个窗口改为 LiquidGlass 的请求：本机已有的组合随整表原样回传时不拦截，否则其他修改也会被拒绝。
+        bool switchesToLiquidGlass =
+            (hoverTheme == 1 && settings.Hover.HoverTheme != 1) ||
+            (showerTheme == 1 && settings.Call.ShowerTheme != 1);
+        if (switchesToLiquidGlass &&
+            (hoverTheme ?? settings.Hover.HoverTheme) == 1 &&
+            (showerTheme ?? settings.Call.ShowerTheme) == 1)
+        {
+            errors.Add("悬浮窗与点名展示窗口不能同时使用 LiquidGlass，请将其中一个改为 Fluent");
+        }
+
         Guid defaultProfileId = settings.Profile.DefaultProfile;
         string? rosterText = ReadText(values, RosterKey);
         string? weightsText = ReadText(values, WeightsKey);
