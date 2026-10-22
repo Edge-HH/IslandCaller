@@ -41,7 +41,7 @@ public partial class ProfileEditor : Window
         }
 
         var members = await ProfileImportHelper.ImportAsync(this, logger);
-        if (members is not null)
+        if (members is not null && !vm.IsSettingsLocked)
         {
             vm.ReplaceMembers(members);
         }

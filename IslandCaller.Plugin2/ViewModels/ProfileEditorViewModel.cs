@@ -146,6 +146,22 @@ public class ProfileEditorViewModel : ReactiveObject
             return;
         }
 
+        if (SameRoster(latest, _baselineMembers))
+        {
+            // 公平模式重置只改变磁盘上的权重；合并这些权重，保留编辑器中尚未保存的新增、改名和性别修改。
+            _baselineMembers = latest;
+            var weightsById = latest.ToDictionary(member => member.Id, member => member.ManualWeight);
+            foreach (var student in ProfileList)
+            {
+                if (weightsById.TryGetValue(student.ID, out double weight))
+                {
+                    student.ManualWeight = weight;
+                }
+            }
+
+            return;
+        }
+
         _baselineMembers = latest;
         if (!SameMembers(latest, ToMembers()))
         {
@@ -185,6 +201,16 @@ public class ProfileEditorViewModel : ReactiveObject
             pair.First.Name == pair.Second.Name &&
             pair.First.Gender == pair.Second.Gender &&
             Math.Abs(pair.First.ManualWeight - pair.Second.ManualWeight) <= 0.0001);
+    }
+
+    private static bool SameRoster(IEnumerable<Person> left, IEnumerable<Person> right)
+    {
+        var a = left.OrderBy(m => m.Id).ToList();
+        var b = right.OrderBy(m => m.Id).ToList();
+        return a.Count == b.Count && a.Zip(b).All(pair =>
+            pair.First.Id == pair.Second.Id &&
+            pair.First.Name == pair.Second.Name &&
+            pair.First.Gender == pair.Second.Gender);
     }
 
     public void AddStudent()

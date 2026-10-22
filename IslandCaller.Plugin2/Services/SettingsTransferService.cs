@@ -89,6 +89,13 @@ public sealed class SettingsTransferService
             throw;
         }
 
+        // 文件读取期间策略可能刚刚启用锁定；提交目录和设置模型前再拦截一次。
+        if (isBlocked?.Invoke() == true)
+        {
+            DeleteDirectoryIfExists(stagingRoot);
+            throw new OperationCanceledException("导入已被取消。");
+        }
+
         var oldSettings = Settings.Instance;
         var settingsStore = new Settings(IAppHost.GetService<ProfileService>());
         var oldAppDataMoved = false;

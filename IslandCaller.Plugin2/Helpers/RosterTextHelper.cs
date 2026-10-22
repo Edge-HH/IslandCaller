@@ -29,12 +29,12 @@ internal static class RosterTextHelper
         string.Join('\n', members
             .OrderBy(member => member.Id)
             .Where(member => !IsDefaultWeight(member.ManualWeight))
-            .Select(member => $"{member.Name}={member.ManualWeight.ToString("0.##", CultureInfo.InvariantCulture)}"));
+            .Select(member => $"{member.Name}={member.ManualWeight.ToString("R", CultureInfo.InvariantCulture)}"));
 
     internal static bool IsDefaultWeight(double weight) => Math.Abs(weight - 1.0) < 0.0001;
 
     /// <summary>解析名单文本；格式有误时把错误追加到 errors 并返回 null。</summary>
-    internal static List<RosterEntry>? ParseRoster(string? text, List<string> errors)
+    internal static List<RosterEntry>? ParseRoster(string? text, List<string> errors, bool allowDuplicateNames = false)
     {
         int errorCount = errors.Count;
         var entries = new List<RosterEntry>();
@@ -68,7 +68,7 @@ internal static class RosterTextHelper
                 continue;
             }
 
-            if (!names.Add(name))
+            if (!names.Add(name) && !allowDuplicateNames)
             {
                 errors.Add($"名单中有重名学生“{name}”，请为重名学生添加区分后缀");
                 continue;

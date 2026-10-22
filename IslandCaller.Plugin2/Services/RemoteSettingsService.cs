@@ -214,6 +214,7 @@ internal sealed class RemoteSettingsService
     private readonly RemotePolicyService _policy;
     private readonly LiquidGlassRuntime _liquidGlassRuntime;
     private readonly ILogger<RemoteSettingsService> _logger;
+    private HashSet<Guid> _pendingFairModeFailures = [];
     private SettingsModel? _trackedModel;
 
     public RemoteSettingsService(
@@ -245,7 +246,7 @@ internal sealed class RemoteSettingsService
         _policy.IsRemoteManaged = true;
         if (_policy.IsFairModeActive)
         {
-            EnforceFairMode(forceReload: true);
+            _pendingFairModeFailures = [.. EnforceFairMode(forceReload: true).FailedProfileIds];
         }
 
         StartTracking();
@@ -327,7 +328,7 @@ internal sealed class RemoteSettingsService
         }
 
         List<RosterTextHelper.RosterEntry>? roster = values.TryGetValue(RosterKey, out string? rosterText)
-            ? RosterTextHelper.ParseRoster(rosterText, errors)
+            ? RosterTextHelper.ParseRoster(rosterText, errors, allowDuplicateNames: true)
             : null;
 
         // 公平模式（含本次请求开启的情况）下权重字段在 WebUI 中置灰但仍会随表单提交，此时直接忽略。
@@ -393,6 +394,17 @@ internal sealed class RemoteSettingsService
 
             if (fairMode is { } fairValue)
             {
+                if (!fairValue && _pendingFairModeFailures.Count > 0 && _policy.IsFairModeActive)
+                {
+                    _pendingFairModeFailures = [.. EnforceFairMode(forceReload: false).FailedProfileIds];
+                    if (_pendingFairModeFailures.Count > 0)
+                    {
+                        string failedNames = FormatFailedProfileNames(_pendingFairModeFailures, settings);
+                        return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode,
+                            $"公平模式仍有名单的手动权重未能清除：{failedNames}。请检查名单文件后重试");
+                    }
+                }
+
                 bool fairModeToggled = _policy.FairMode != fairValue;
                 if (fairModeToggled)
                 {
@@ -405,6 +417,7 @@ internal sealed class RemoteSettingsService
                 {
                     ManualWeightResetResult reset = EnforceFairMode(forceReload: fairModeToggled);
                     resetFailures = [.. reset.FailedProfileIds];
+                    _pendingFairModeFailures = [.. reset.FailedProfileIds];
                     if (reset.ChangedCount > 0)
                     {
                         if (fairModeToggled)
@@ -430,6 +443,7 @@ internal sealed class RemoteSettingsService
                     saved.All(member => member.ManualWeight == 1.0))
                 {
                     resetFailures.Remove(defaultProfileId);
+                    _pendingFairModeFailures.Remove(defaultProfileId);
                 }
             }
 
@@ -511,9 +525,7 @@ internal sealed class RemoteSettingsService
 
         if (resetFailures.Count > 0)
         {
-            string failedNames = string.Join("、", resetFailures.Take(5)
-                .Select(id => settings.Profile.ProfileList.GetValueOrDefault(id, id.ToString()))) +
-                (resetFailures.Count > 5 ? " 等" : string.Empty);
+            string failedNames = FormatFailedProfileNames(resetFailures, settings);
             string applied = changed.Count == 0 ? string.Empty : $"已写入：{string.Join("、", changed)}；";
             _logger.LogWarning("RemoteCI 用户 {User} 开启公平模式，但 {Count} 个名单的手动权重未能清除：{Names}",
                 requestedBy ?? "未知", resetFailures.Count, failedNames);
@@ -529,6 +541,14 @@ internal sealed class RemoteSettingsService
 
         _logger.LogInformation("RemoteCI 用户 {User} 修改了 IslandCaller 设置：{Message}", requestedBy ?? "未知", message);
         return RemoteCommandOutcome.Ok(message);
+    }
+
+    private static string FormatFailedProfileNames(IEnumerable<Guid> profileIds, SettingsModel settings)
+    {
+        var ids = profileIds.ToList();
+        return string.Join("、", ids.Take(5)
+            .Select(id => settings.Profile.ProfileList.GetValueOrDefault(id, id.ToString()))) +
+            (ids.Count > 5 ? " 等" : string.Empty);
     }
 
     /// <summary>
@@ -583,10 +603,20 @@ internal sealed class RemoteSettingsService
 
         // WebUI 单班表单会提交全部字段：名单内容未变时沿用原有编号，避免每次保存其他设置都重写名单。
         var orderedCurrent = currentMembers.OrderBy(member => member.Id).ToList();
+        var duplicateNames = roster?
+            .GroupBy(entry => entry.Name, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToList() ?? [];
         if (roster is not null && roster.Count == orderedCurrent.Count && roster.Zip(orderedCurrent).All(pair =>
                 pair.First.Name == pair.Second.Name && pair.First.Gender == pair.Second.Gender))
         {
             roster = null;
+        }
+        else if (duplicateNames.Count > 0)
+        {
+            errors.Add($"名单中有重名学生“{string.Join("、", duplicateNames.Take(5))}”，新名单不能包含重名");
+            return [];
         }
 
         List<ProfileService.Person> members = roster is not null
