@@ -476,7 +476,9 @@ internal sealed class RemoteSettingsService
 
             if (fairMode is { } fairValue)
             {
-                if (!fairValue && _pendingFairModeFailures.Count > 0 && _policy.IsFairModeActive)
+                // 关闭前总是重新清除一次：名单文件可能绕过 SaveProfile 被替换（如导入数据包后尚未重启），
+                // 只在此前有失败时才重试会让这些权重在关闭后生效。
+                if (!fairValue && _policy.IsFairModeActive)
                 {
                     _pendingFairModeFailures = [.. EnforceFairMode(forceReload: false).FailedProfileIds];
                     if (_pendingFairModeFailures.Count > 0)
@@ -485,7 +487,7 @@ internal sealed class RemoteSettingsService
                         string failedNames = FormatFailedProfileNames(_pendingFairModeFailures, settings);
                         string applied = changed.Count == 0 ? string.Empty : $"已写入：{string.Join("、", changed)}；";
                         return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode,
-                            $"{applied}公平模式仍有名单的手动权重未能清除：{failedNames}，未关闭公平模式。请检查名单文件后重试");
+                            $"{applied}关闭公平模式前清除手动权重失败：{failedNames}，未关闭公平模式。请检查名单文件后重试");
                     }
                 }
 
