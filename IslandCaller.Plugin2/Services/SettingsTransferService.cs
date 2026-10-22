@@ -77,6 +77,7 @@ public sealed class SettingsTransferService
             importedSettings = await ReadAndExtractAsync(source, stagingAppData, cancellationToken);
             ValidateRequiredData(importedSettings, stagingAppData);
 
+            // 文件读取期间策略可能刚刚启用锁定，提交目录和设置模型前再拦截一次；
             // 此后到提交完成之间没有 await，不会再被异步修改的策略打断。
             if (isBlocked?.Invoke() == true)
             {
@@ -87,13 +88,6 @@ public sealed class SettingsTransferService
         {
             DeleteDirectoryIfExists(stagingRoot);
             throw;
-        }
-
-        // 文件读取期间策略可能刚刚启用锁定；提交目录和设置模型前再拦截一次。
-        if (isBlocked?.Invoke() == true)
-        {
-            DeleteDirectoryIfExists(stagingRoot);
-            throw new OperationCanceledException("导入已被取消。");
         }
 
         var oldSettings = Settings.Instance;
