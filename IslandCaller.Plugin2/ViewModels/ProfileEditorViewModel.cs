@@ -35,7 +35,8 @@ public class ProfileEditorViewModel : ReactiveObject
 
     /// <summary>编辑器最近一次与磁盘同步时的名单内容与名称，用于识别外部修改。</summary>
     private List<Person> _baselineMembers;
-    private List<Guid> _baselineRowKeys;
+    /// <summary>与按序号排列的 _baselineMembers 逐行对应的编辑器行，用于把外部权重修改合并回原来那一行。</summary>
+    private List<Guid> _baselineRowKeys = [];
     private string _baselineName;
 
     /// <summary>RemoteCI 公平模式生效时手动权重固定为 1，不允许编辑。</summary>
@@ -67,12 +68,8 @@ public class ProfileEditorViewModel : ReactiveObject
         ProfileName = profileName;
         _baselineName = profileName;
         _baselineMembers = _profileService.GetMembers(profileId);
-        var initialModels = _baselineMembers
-            .OrderBy(m => m.Id)
-            .Select(member => ToStudentModel(member))
-            .ToList();
-        ProfileList = new ObservableCollection<StudentModel>(initialModels);
-        _baselineRowKeys = initialModels.Select(model => model.RowKey).ToList();
+        ReplaceMembers(_baselineMembers);
+        ResetBaselineRows();
 
         RowCommand = new RelayCommand<StudentModel>(RemoveStudent);
         _policy.PropertyChanged += PolicyOnPropertyChanged;
@@ -171,15 +168,19 @@ public class ProfileEditorViewModel : ReactiveObject
         _baselineMembers = latest;
         if (!SameMembers(latest, ToMembers()))
         {
-            ReplaceMembers(latest, resetBaselineRows: true);
+            ReplaceMembers(latest);
         }
-        else
-        {
-            _baselineRowKeys = ProfileList
-                .OrderBy(model => model.ID)
-                .Select(model => model.RowKey)
-                .ToList();
-        }
+
+        ResetBaselineRows();
+    }
+
+    /// <summary>编辑器内容刚与磁盘一致时调用，把当前各行记为磁盘名单中对应的行。</summary>
+    private void ResetBaselineRows()
+    {
+        _baselineRowKeys = ProfileList
+            .OrderBy(model => model.ID)
+            .Select(model => model.RowKey)
+            .ToList();
     }
 
     private void SyncNameFromSettings()
@@ -213,7 +214,7 @@ public class ProfileEditorViewModel : ReactiveObject
             pair.First.Id == pair.Second.Id &&
             pair.First.Name == pair.Second.Name &&
             pair.First.Gender == pair.Second.Gender &&
-            Math.Abs(pair.First.ManualWeight - pair.Second.ManualWeight) <= 0.0001);
+            pair.First.ManualWeight == pair.Second.ManualWeight);
     }
 
     private static bool SameRoster(IEnumerable<Person> left, IEnumerable<Person> right)
@@ -238,21 +239,15 @@ public class ProfileEditorViewModel : ReactiveObject
         });
     }
 
-    public void ReplaceMembers(IEnumerable<Person> members, bool resetBaselineRows = false)
+    /// <summary>
+    /// 用给定名单替换编辑器内容。每行都是新行：导入的名单尚未保存，与磁盘上的学生没有对应关系，
+    /// 外部只修改权重时不应合并到这些行上。
+    /// </summary>
+    public void ReplaceMembers(IEnumerable<Person> members)
     {
-        var previousRowKeys = resetBaselineRows
-            ? []
-            : ProfileList.Select(model => model.RowKey).ToList();
-        var models = members
+        ProfileList = new ObservableCollection<StudentModel>(members
             .OrderBy(m => m.Id)
-            .Select((member, index) => ToStudentModel(member,
-                index < previousRowKeys.Count ? previousRowKeys[index] : null))
-            .ToList();
-        ProfileList = new ObservableCollection<StudentModel>(models);
-        if (resetBaselineRows)
-        {
-            _baselineRowKeys = models.Select(model => model.RowKey).ToList();
-        }
+            .Select(ToStudentModel));
     }
 
     public List<Person> ToMembers()
@@ -274,9 +269,9 @@ public class ProfileEditorViewModel : ReactiveObject
         }
     }
 
-    private static StudentModel ToStudentModel(Person member, Guid? rowKey = null)
+    private static StudentModel ToStudentModel(Person member)
     {
-        return new StudentModel(rowKey)
+        return new StudentModel
         {
             ID = member.Id,
             Name = member.Name,
@@ -287,12 +282,8 @@ public class ProfileEditorViewModel : ReactiveObject
 
     public class StudentModel : ReactiveObject
     {
-        public Guid RowKey { get; }
-
-        public StudentModel(Guid? rowKey = null)
-        {
-            RowKey = rowKey ?? Guid.NewGuid();
-        }
+        /// <summary>行的稳定身份；序号可在编辑器中修改，不能用来对应磁盘上的学生。</summary>
+        public Guid RowKey { get; } = Guid.NewGuid();
 
         public int ID
         {
