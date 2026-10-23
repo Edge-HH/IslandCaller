@@ -128,7 +128,7 @@ public class ProfileEditorViewModel : ReactiveObject
 
     /// <summary>
     /// 名单被编辑器之外的途径（如 RemoteCI 下发）改写后，用磁盘内容刷新编辑器，
-    /// 避免关闭编辑器时把过期的缓存写回、撤销管理员的修改。编辑器自身保存产生的变化会因内容一致而被忽略。
+    /// 避免关闭编辑器时把过期的缓存写回、撤销管理员的修改。编辑器自身保存后内容与磁盘一致，只更新基准。
     /// </summary>
     private void SyncMembersFromDisk()
     {
@@ -142,6 +142,15 @@ public class ProfileEditorViewModel : ReactiveObject
             return;
         }
 
+        // 磁盘已与编辑器内容一致（如编辑器自身刚保存）：把当前各行记为新的基准。导入后保存的都是新行，
+        // 不重新对应的话，之后外部只修改权重时找不到这些行，关闭编辑器会把旧权重写回。
+        if (SameMembers(latest, ToMembers()))
+        {
+            _baselineMembers = latest;
+            ResetBaselineRows();
+            return;
+        }
+
         if (SameMembers(latest, _baselineMembers))
         {
             return;
@@ -149,11 +158,13 @@ public class ProfileEditorViewModel : ReactiveObject
 
         if (SameRoster(latest, _baselineMembers))
         {
-            // 公平模式重置只改变磁盘上的权重；合并这些权重，保留编辑器中尚未保存的新增、改名和性别修改。
-            _baselineMembers = latest;
+            // 公平模式重置、远程修改权重只改变磁盘上的权重：只合并磁盘上权重实际变化的行，
+            // 保留编辑器中尚未保存的新增、改名、性别修改以及其余行的权重修改。
             var weightsByRowKey = _baselineRowKeys
-                .Zip(latest.OrderBy(member => member.Id))
-                .ToDictionary(pair => pair.First, pair => pair.Second.ManualWeight);
+                .Zip(_baselineMembers.OrderBy(member => member.Id), latest.OrderBy(member => member.Id))
+                .Where(row => row.Second.ManualWeight != row.Third.ManualWeight)
+                .ToDictionary(row => row.First, row => row.Third.ManualWeight);
+            _baselineMembers = latest;
             foreach (var student in ProfileList)
             {
                 if (weightsByRowKey.TryGetValue(student.RowKey, out double weight))
@@ -166,11 +177,7 @@ public class ProfileEditorViewModel : ReactiveObject
         }
 
         _baselineMembers = latest;
-        if (!SameMembers(latest, ToMembers()))
-        {
-            ReplaceMembers(latest);
-        }
-
+        ReplaceMembers(latest);
         ResetBaselineRows();
     }
 
