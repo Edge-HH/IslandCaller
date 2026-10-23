@@ -62,6 +62,8 @@ internal sealed class RemoteSettingsService
 
     private const string LiquidGlassWarning = "LiquidGlass 仍在开发中，存在崩溃风险，严禁在教学或生产环境中使用；悬浮窗与展示窗口只有一个能使用 LiquidGlass。";
 
+    private const string ReloadFailedMessage = "重新加载当前名单失败，点名暂不可用，请检查名单与点名历史记录文件";
+
     /// <summary>插件设置页字段，顺序即 WebUI 中的显示顺序。</summary>
     internal static IReadOnlyList<RemoteSettingField> Fields { get; } =
     [
@@ -220,7 +222,6 @@ internal sealed class RemoteSettingsService
     private readonly LiquidGlassRuntime _liquidGlassRuntime;
     private readonly WindowsManager _windowsManager;
     private readonly ILogger<RemoteSettingsService> _logger;
-    private HashSet<Guid> _pendingFairModeFailures = [];
     private SettingsModel? _trackedModel;
 
     public RemoteSettingsService(
@@ -254,7 +255,9 @@ internal sealed class RemoteSettingsService
         _policy.IsRemoteManaged = true;
         if (_policy.IsFairModeActive)
         {
-            _pendingFairModeFailures = [.. EnforceFairMode(forceReload: true).FailedProfileIds];
+            // 启动时没有远程请求可回执，清除或重新加载失败只记录日志；关闭公平模式前会再次清除。
+            bool reloadFailed = false;
+            EnforceFairMode(forceReload: true, ref reloadFailed);
         }
 
         StartTracking();
@@ -421,6 +424,8 @@ internal sealed class RemoteSettingsService
         var changed = new List<string>();
         var notes = new List<string>();
         List<Guid> resetFailures = [];
+        // 文件已写入但重新加载当前名单失败时点名暂不可用，回执需如实说明；以本次最后一次重新加载的结果为准。
+        bool reloadFailed = false;
         List<ProfileService.Person>? targetMembers = null;
         if (roster is not null || weights is not null)
         {
@@ -480,14 +485,15 @@ internal sealed class RemoteSettingsService
                 // 只在此前有失败时才重试会让这些权重在关闭后生效。
                 if (!fairValue && _policy.IsFairModeActive)
                 {
-                    _pendingFairModeFailures = [.. EnforceFairMode(forceReload: false).FailedProfileIds];
-                    if (_pendingFairModeFailures.Count > 0)
+                    IReadOnlyList<Guid> disableFailures = EnforceFairMode(forceReload: false, ref reloadFailed).FailedProfileIds;
+                    if (disableFailures.Count > 0)
                     {
                         // 锁定开关可能已在上面写入，回执需如实列出，其余设置本次不再写入。
-                        string failedNames = FormatFailedProfileNames(_pendingFairModeFailures, settings);
+                        string failedNames = FormatFailedProfileNames(disableFailures, settings);
                         string applied = changed.Count == 0 ? string.Empty : $"已写入：{string.Join("、", changed)}；";
+                        string reload = reloadFailed ? $"；{ReloadFailedMessage}" : string.Empty;
                         return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode,
-                            $"{applied}关闭公平模式前清除手动权重失败：{failedNames}，未关闭公平模式。请检查名单文件后重试");
+                            $"{applied}关闭公平模式前清除手动权重失败：{failedNames}，未关闭公平模式。请检查名单文件后重试{reload}");
                     }
                 }
 
@@ -501,9 +507,8 @@ internal sealed class RemoteSettingsService
                 // 即使公平模式此前已开启，重复下发也会重新清除，使上次未能写入的名单可以重试。
                 if (fairValue && _policy.IsFairModeActive)
                 {
-                    ManualWeightResetResult reset = EnforceFairMode(forceReload: fairModeToggled);
+                    ManualWeightResetResult reset = EnforceFairMode(forceReload: fairModeToggled, ref reloadFailed);
                     resetFailures = [.. reset.FailedProfileIds];
-                    _pendingFairModeFailures = [.. reset.FailedProfileIds];
                     if (reset.ChangedCount > 0)
                     {
                         if (fairModeToggled)
@@ -521,7 +526,7 @@ internal sealed class RemoteSettingsService
             if (targetMembers is not null)
             {
                 // 重新读取：本次开启公平模式时名单文件刚被重置过，对比时应以重置后的内容为准。
-                ApplyMembers(defaultProfileId, ReadMembersOrEmpty(defaultProfileId), targetMembers, changed);
+                ApplyMembers(defaultProfileId, ReadMembersOrEmpty(defaultProfileId), targetMembers, changed, ref reloadFailed);
 
                 // 同一请求上传的名单已按公平模式写成权重 1 时，不应再把默认名单报告为清除失败。
                 if (resetFailures.Contains(defaultProfileId) &&
@@ -529,7 +534,6 @@ internal sealed class RemoteSettingsService
                     saved.All(member => member.ManualWeight == 1.0))
                 {
                     resetFailures.Remove(defaultProfileId);
-                    _pendingFairModeFailures.Remove(defaultProfileId);
                 }
             }
 
@@ -600,8 +604,9 @@ internal sealed class RemoteSettingsService
             _logger.LogError(ex, "写入 RemoteCI 下发的 IslandCaller 设置失败");
             // 各项在写入前就已记录：出错的那一项可能已在本机生效但未保存，回执如实提示重启后可能恢复。
             string applied = changed.Count == 0 ? string.Empty : $"已修改：{string.Join("、", changed)}；";
+            string reload = reloadFailed ? $"；{ReloadFailedMessage}" : string.Empty;
             return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode,
-                $"{applied}写入设置时出错，部分修改可能未能保存，重启后可能恢复原值：{ex.Message}");
+                $"{applied}写入设置时出错，部分修改可能未能保存，重启后可能恢复原值：{ex.Message}{reload}");
         }
         finally
         {
@@ -611,14 +616,25 @@ internal sealed class RemoteSettingsService
             }
         }
 
-        if (resetFailures.Count > 0)
+        if (resetFailures.Count > 0 || reloadFailed)
         {
-            string failedNames = FormatFailedProfileNames(resetFailures, settings);
+            var failures = new List<string>();
+            if (resetFailures.Count > 0)
+            {
+                string failedNames = FormatFailedProfileNames(resetFailures, settings);
+                _logger.LogWarning("RemoteCI 用户 {User} 开启公平模式，但 {Count} 个名单的手动权重未能清除：{Names}",
+                    requestedBy ?? "未知", resetFailures.Count, failedNames);
+                failures.Add($"公平模式已开启，但以下名单的手动权重未能清除：{failedNames}。请检查名单文件后重新下发公平模式以重试");
+            }
+
+            if (reloadFailed)
+            {
+                _logger.LogWarning("RemoteCI 用户 {User} 修改了 IslandCaller 设置，但重新加载当前名单失败", requestedBy ?? "未知");
+                failures.Add(ReloadFailedMessage);
+            }
+
             string applied = changed.Count == 0 ? string.Empty : $"已写入：{string.Join("、", changed)}；";
-            _logger.LogWarning("RemoteCI 用户 {User} 开启公平模式，但 {Count} 个名单的手动权重未能清除：{Names}",
-                requestedBy ?? "未知", resetFailures.Count, failedNames);
-            return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode,
-                $"{applied}公平模式已开启，但以下名单的手动权重未能清除：{failedNames}。请检查名单文件后重新下发公平模式以重试");
+            return RemoteCommandOutcome.Failure(RemoteCommandOutcome.SaveFailedCode, $"{applied}{string.Join("；", failures)}");
         }
 
         string message = changed.Count == 0 ? "设置无变化" : $"已更新 {changed.Count} 项：{string.Join("、", changed)}";
@@ -644,12 +660,13 @@ internal sealed class RemoteSettingsService
     /// 公平模式重复下发且没有任何变化时跳过重载，避免无谓地重载历史记录。
     /// </summary>
     /// <param name="forceReload">公平模式刚刚生效（开启或随插件启动）时必须重载，使运行时立即忽略手动权重。</param>
-    private ManualWeightResetResult EnforceFairMode(bool forceReload)
+    /// <param name="reloadFailed">执行了重新加载时更新为本次重新加载是否失败，未重新加载时保持不变。</param>
+    private ManualWeightResetResult EnforceFairMode(bool forceReload, ref bool reloadFailed)
     {
         ManualWeightResetResult result = _profileService.ResetAllManualWeights();
         if (forceReload || result.ChangedCount > 0 || result.FailedProfileIds.Count > 0)
         {
-            ReloadActiveProfile();
+            reloadFailed = !TryReloadActiveProfile();
         }
 
         _logger.LogInformation("公平模式已生效，重置了 {Count} 个名单的手动权重，{Failed} 个名单失败",
@@ -657,21 +674,26 @@ internal sealed class RemoteSettingsService
         return result;
     }
 
-    private void ReloadActiveProfile()
+    /// <summary>
+    /// 重新加载当前名单、历史记录与运行时权重。失败时这些服务停留在未初始化状态、点名不可用，返回 false。
+    /// </summary>
+    private bool TryReloadActiveProfile()
     {
         Guid activeProfileId = _profileService.ActiveProfileId;
         if (activeProfileId == Guid.Empty)
         {
-            return;
+            return true;
         }
 
         try
         {
             _profileRuntimeService.Reload(activeProfileId);
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "重新加载名单 {ProfileGuid} 失败", activeProfileId);
+            return false;
         }
     }
 
@@ -826,11 +848,13 @@ internal sealed class RemoteSettingsService
         }
     }
 
+    /// <param name="reloadFailed">保存的是当前名单时更新为重新加载是否失败，否则保持不变。</param>
     private void ApplyMembers(
         Guid profileId,
         List<ProfileService.Person> currentMembers,
         List<ProfileService.Person> targetMembers,
-        List<string> changed)
+        List<string> changed,
+        ref bool reloadFailed)
     {
         var current = currentMembers.OrderBy(member => member.Id).ToList();
         bool membersChanged = current.Count != targetMembers.Count || current.Zip(targetMembers).Any(pair =>
@@ -849,7 +873,7 @@ internal sealed class RemoteSettingsService
         _profileService.SaveProfile(profileId, targetMembers);
         if (_profileService.ActiveProfileId == profileId)
         {
-            ReloadActiveProfile();
+            reloadFailed = !TryReloadActiveProfile();
         }
     }
 
