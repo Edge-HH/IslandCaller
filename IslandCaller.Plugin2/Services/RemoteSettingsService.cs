@@ -342,24 +342,27 @@ internal sealed class RemoteSettingsService
 
         // 悬浮窗与展示窗口同时使用 LiquidGlass 会触发已知的崩溃问题，远程修改不能新造出这种组合。
         // 只拦截本次把某个窗口改为 LiquidGlass 的请求：本机已有的组合随整表原样回传时不拦截，否则其他修改也会被拒绝。
+        int hoverThemeAfterApply = hoverTheme ?? settings.Hover.HoverTheme;
+        // 本次请求让悬浮窗开始以 LiquidGlass 显示：改为 LiquidGlass 主题，或在 LiquidGlass 主题下启用悬浮窗。
+        bool hoverStartsLiquidGlass = (hoverEnable ?? settings.Hover.IsEnable) && hoverThemeAfterApply == 1 &&
+                                      (settings.Hover.HoverTheme != 1 || !settings.Hover.IsEnable);
         bool switchesToLiquidGlass =
             (hoverTheme == 1 && settings.Hover.HoverTheme != 1) ||
-            (showerTheme == 1 && settings.Call.ShowerTheme != 1);
+            (showerTheme == 1 && settings.Call.ShowerTheme != 1) ||
+            hoverStartsLiquidGlass;
         if (switchesToLiquidGlass &&
-            (hoverTheme ?? settings.Hover.HoverTheme) == 1 &&
+            hoverThemeAfterApply == 1 &&
             (showerTheme ?? settings.Call.ShowerTheme) == 1)
         {
             errors.Add("悬浮窗与点名展示窗口不能同时使用 LiquidGlass，请将其中一个改为 Fluent");
         }
 
-        // 悬浮窗主题一改就会立即重建窗口，而正在显示的点名展示窗口要等本次点名结束才关闭；
-        // 此时把悬浮窗改为 LiquidGlass 会让两个 LiquidGlass 窗口同时存在，需等点名结束后再修改。
-        if (errors.Count == 0 &&
-            hoverTheme == 1 && settings.Hover.HoverTheme != 1 &&
-            _windowsManager.ShowerWindow is LiquidShower)
+        // 悬浮窗主题一改或悬浮窗一启用就会立即创建新窗口，而正在显示的点名展示窗口要等本次点名结束才关闭；
+        // 此时新建 LiquidGlass 悬浮窗会让两个 LiquidGlass 窗口同时存在，需等点名结束后再修改。
+        if (errors.Count == 0 && hoverStartsLiquidGlass && _windowsManager.ShowerWindow is LiquidShower)
         {
             return RemoteCommandOutcome.Failure(RemoteCommandOutcome.BusyCode,
-                "点名展示窗口正在以 LiquidGlass 显示，请在本次点名结束后再把悬浮窗改为 LiquidGlass");
+                "点名展示窗口正在以 LiquidGlass 显示，请在本次点名结束后再把悬浮窗改为 LiquidGlass 或启用悬浮窗");
         }
 
         Guid defaultProfileId = settings.Profile.DefaultProfile;
@@ -556,11 +559,21 @@ internal sealed class RemoteSettingsService
             SetValue(breakDisable, settings.General.BreakDisable, value => settings.General.BreakDisable = value, "下课禁用", changed);
             SetValue(interruptable, settings.General.Interruptable, value => settings.General.Interruptable = value, "打断点名", changed);
 
-            SetValue(hoverEnable, settings.Hover.IsEnable, value => settings.Hover.IsEnable = value, "启用悬浮窗", changed);
+            // 关闭悬浮窗先于改主题、启用悬浮窗晚于改主题：否则会按旧主题临时创建一个随即被重建的悬浮窗，
+            // 点名展示窗口正以 LiquidGlass 显示时就可能同时存在两个 LiquidGlass 窗口。
+            if (hoverEnable == false)
+            {
+                SetValue(hoverEnable, settings.Hover.IsEnable, value => settings.Hover.IsEnable = value, "启用悬浮窗", changed);
+            }
+
             SetValue(hoverScale, settings.Hover.ScalingFactor, value => settings.Hover.ScalingFactor = value, "悬浮窗缩放系数", changed);
             SetValue(hoverLayout, settings.Hover.HoverLayout, value => settings.Hover.HoverLayout = value, "悬浮窗布局", changed);
             SetValue(ResolveTheme(hoverTheme, "悬浮窗", notes), settings.Hover.HoverTheme,
                 value => settings.Hover.HoverTheme = value, "悬浮窗主题", changed);
+            if (hoverEnable == true)
+            {
+                SetValue(hoverEnable, settings.Hover.IsEnable, value => settings.Hover.IsEnable = value, "启用悬浮窗", changed);
+            }
 
             if (notifyClassIsland is not null || notifyIslandCaller is not null)
             {
